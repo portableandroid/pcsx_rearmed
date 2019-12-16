@@ -41,7 +41,9 @@ void ClearAllCheats();
 
 void LoadCheats(const char *filename);
 void SaveCheats(const char *filename);
-
+#ifdef PORTANDROID
+void RevertCheats(void);
+#endif
 void ApplyCheats();
 
 int AddCheat(const char *descr, char *code);

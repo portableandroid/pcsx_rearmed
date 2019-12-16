@@ -30,10 +30,14 @@ void SetupSound(void)
 #ifdef HAVE_PULSE
 		REGISTER_DRIVER(pulse);
 #endif
-#ifdef HAVE_LIBRETRO
-		REGISTER_DRIVER(libretro);
+#ifdef PORTANDROID
+		REGISTER_DRIVER(portandroid);
 #else
+	#ifdef HAVE_LIBRETRO
+		REGISTER_DRIVER(libretro);
+	#else
 		REGISTER_DRIVER(none);
+	#endif
 #endif
 	}
 

@@ -397,6 +397,11 @@ int CheckCdrom() {
 	SysPrintf(_("CD-ROM Label: %.32s\n"), CdromLabel);
 	SysPrintf(_("CD-ROM ID: %.9s\n"), CdromId);
 	SysPrintf(_("CD-ROM EXE Name: %.255s\n"), exename);
+	
+#ifdef PORTANDROID
+	//Set CD ID and label
+	cb_itf.cb_rom_info_set(NULL, CdromId, 0);
+#endif
 
 	BuildPPFCache();
 

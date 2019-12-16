@@ -180,6 +180,51 @@ void SaveCheats(const char *filename) {
 	SysPrintf(_("Cheats saved to: %s\n"), filename);
 }
 
+#ifdef PORTANDROID
+// Revert all enabled cheats
+void RevertCheats(void)
+{
+	int		i, j, k, endindex;
+	int		was_enabled;
+
+	for (i = 0; i < NumCheats; i++) {
+	
+		if(!(Cheats[i].Enabled && Cheats[i].WasEnabled)){
+			continue;
+		}
+
+		// process all cheat codes
+		endindex = Cheats[i].First + Cheats[i].n;
+
+		for (j = Cheats[i].First; j < endindex; j++) {
+			u8		type = (uint8_t)(CheatCodes[j].Addr >> 24);
+			u32		addr = (CheatCodes[j].Addr & 0x001FFFFF);
+			u16		val = CheatCodes[j].Val;
+			u32		taddr;
+
+			//Skip unrevertable command
+			if (type != CHEAT_CONST16 && type != CHEAT_CONST8){
+				continue;
+			}
+			
+			//Get olv value
+			val = CheatCodes[j].OldVal;
+
+			switch (type) {
+				case CHEAT_CONST8:
+					psxMu8ref(addr) = (u8)val;
+					break;
+
+				case CHEAT_CONST16:
+					psxMu16ref(addr) = SWAPu16(val);
+					break;
+			}
+		}
+	}
+}
+
+#endif
+
 // apply all enabled cheats
 void ApplyCheats() {
 	int		i, j, k, endindex;
@@ -341,7 +386,12 @@ int AddCheat(const char *descr, char *code) {
 	}
 
 	Cheats[NumCheats].Descr = strdup(descr[0] ? descr : _("(Untitled)"));
+#ifdef PORTANDROID	
+	//Only enabled cheat will be added in ClassicBoy
+	Cheats[NumCheats].Enabled = 1;
+#else
 	Cheats[NumCheats].Enabled = 0;
+#endif
 	Cheats[NumCheats].WasEnabled = 0;
 	Cheats[NumCheats].First = NumCodes;
 	Cheats[NumCheats].n = 0;
@@ -352,7 +402,11 @@ int AddCheat(const char *descr, char *code) {
 	while (c) {
 		unsigned int t1, t2;
 
+		#ifdef PORTANDROID
+		while (*p2 != ',' && *p2 != '\0')
+		#else
 		while (*p2 != '\n' && *p2 != '\0')
+		#endif
 			p2++;
 
 		if (*p2 == '\0')

@@ -43,17 +43,24 @@ extern "C" {
 #include <sys/types.h>
 #include <assert.h>
 
+#ifndef PORTANDROID
 // Define types
 typedef int8_t s8;
 typedef int16_t s16;
 typedef int32_t s32;
 typedef int64_t s64;
-typedef intptr_t sptr;
 
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
+
+#else
+#include "cb_interface.h"
+#include "emu_init.h"
+#endif
+
+typedef intptr_t sptr;
 typedef uintptr_t uptr;
 
 typedef uint8_t boolean;
