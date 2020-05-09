@@ -2542,12 +2542,14 @@ void retro_run(void)
 
 	stop = 0;
 	psxCpu->Execute();
-
 	video_cb((vout_fb_dirty || !vout_can_dupe || !duping_enable) ? vout_buf_ptr : NULL,
 		vout_width, vout_height, vout_width * 2);
 	vout_fb_dirty = 0;
 
     set_vout_fb();
+#ifdef PORTANDROID
+	pl_rearmed_cbs.fskip_advice = cb_context.video_skip;
+#endif
 }
 
 static bool try_use_bios(const char *path)
