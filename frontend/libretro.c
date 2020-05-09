@@ -15,6 +15,10 @@
 #include <sys/syscall.h>
 #endif
 
+#ifdef SWITCH
+#include <switch.h>
+#endif
+
 #include "../libpcsxcore/misc.h"
 #include "../libpcsxcore/psxcounters.h"
 #include "../libpcsxcore/psxmem_map.h"
@@ -41,6 +45,18 @@
 #include "3ds/3ds_utils.h"
 #endif
 
+#ifdef PORTANDROID
+#define _cb_type_lock_
+#include "emu_retro.h"
+/* sound driver */
+extern void cb_sound_driver_fill(void);
+extern int cb_sound_driver_init(void);
+extern void cb_sound_driver_finish(void);
+extern int cb_sound_driver_busy(void);
+extern void cb_sound_driver_feed(void *buf, int bytes);
+extern u32 cb_snd_frame_len;
+#endif
+
 #define PORTS_NUMBER 8
 
 #ifndef MIN
@@ -54,6 +70,18 @@
 #define ISHEXDEC ((buf[cursor]>='0') && (buf[cursor]<='9')) || ((buf[cursor]>='a') && (buf[cursor]<='f')) || ((buf[cursor]>='A') && (buf[cursor]<='F'))
 
 #define INTERNAL_FPS_SAMPLE_PERIOD 64
+
+#ifdef DRC_DISABLE
+int stop;
+u32 next_interupt;
+u32 event_cycles[PSXINT_COUNT];
+int cycle_multiplier;
+int new_dynarec_hacks;
+
+void new_dyna_before_save(void) { }
+void new_dyna_after_save(void) { }
+void new_dyna_freeze(void *f, int i) { }
+#endif
 
 //hack to prevent retroarch freezing when reseting in the menu but not while running with the hot key
 static int rebootemu = 0;
@@ -77,8 +105,12 @@ static bool found_bios;
 static bool display_internal_fps = false;
 static unsigned frame_count = 0;
 static bool libretro_supports_bitmasks = false;
+#ifdef GPU_PEOPS
 static int show_advanced_gpu_peops_settings = -1;
+#endif
+#ifdef GPU_UNAI
 static int show_advanced_gpu_unai_settings  = -1;
+#endif
 
 static unsigned previous_width = 0;
 static unsigned previous_height = 0;
@@ -121,6 +153,8 @@ int in_enable_vibration = 1;
 #define NEGCON_RANGE 0x7FFF
 static int negcon_deadzone = 0;
 static int negcon_linearity = 1;
+
+static bool axis_bounds_modifier;
 
 /* PSX max resolution is 640x512, but with enhancement it's 1024x512 */
 #define VOUT_MAX_WIDTH 1024
@@ -485,6 +519,16 @@ static void snd_feed(void *buf, int bytes)
 		audio_batch_cb(buf, bytes / 4);
 }
 
+#ifdef PORTANDROID
+void out_register_libretro(struct out_driver *drv)
+{
+	drv->name = "portandroid";
+	drv->init = cb_sound_driver_init;
+	drv->finish = cb_sound_driver_finish;
+	drv->busy = cb_sound_driver_busy;
+	drv->feed = cb_sound_driver_feed;
+}
+#else
 void out_register_libretro(struct out_driver *drv)
 {
 	drv->name = "libretro";
@@ -493,6 +537,7 @@ void out_register_libretro(struct out_driver *drv)
 	drv->busy = snd_busy;
 	drv->feed = snd_feed;
 }
+#endif
 
 /* libretro */
 void retro_set_environment(retro_environment_t cb)
@@ -844,14 +889,71 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code)
 		Cheats[index].Enabled = enabled;
 }
 
+// just in case, maybe a win-rt port in the future?
+#ifdef _WIN32
+#define SLASH '\\'
+#else
+#define SLASH '/'
+#endif
+
+#ifndef PATH_MAX
+#define PATH_MAX  4096
+#endif
+
 /* multidisk support */
+static unsigned int disk_initial_index;
+static char disk_initial_path[PATH_MAX];
 static bool disk_ejected;
 static unsigned int disk_current_index;
 static unsigned int disk_count;
 static struct disks_state {
 	char *fname;
+	char *flabel;
 	int internal_index; // for multidisk eboots
 } disks[8];
+
+static void get_disk_label(char *disk_label, const char *disk_path, size_t len)
+{
+	const char *base = NULL;
+
+	if (!disk_path || (*disk_path == '\0'))
+		return;
+
+	base = strrchr(disk_path, SLASH);
+	if (!base)
+		base = disk_path;
+
+	if (*base == SLASH)
+		base++;
+
+	strncpy(disk_label, base, len - 1);
+	disk_label[len - 1] = '\0';
+
+	char *ext = strrchr(disk_label, '.');
+	if (ext)
+		*ext = '\0';
+}
+
+static void disk_init(void)
+{
+	size_t i;
+
+	disk_ejected       = false;
+	disk_current_index = 0;
+	disk_count         = 0;
+
+	for (i = 0; i < sizeof(disks) / sizeof(disks[0]); i++) {
+		if (disks[i].fname != NULL) {
+			free(disks[i].fname);
+			disks[i].fname = NULL;
+		}
+		if (disks[i].flabel != NULL) {
+			free(disks[i].flabel);
+			disks[i].flabel = NULL;
+		}
+		disks[i].internal_index = 0;
+	}
+}
 
 static bool disk_set_eject_state(bool ejected)
 {
@@ -923,24 +1025,38 @@ static unsigned int disk_get_num_images(void)
 static bool disk_replace_image_index(unsigned index,
 	const struct retro_game_info *info)
 {
-	char *old_fname;
-	bool ret = true;
+	char *old_fname  = NULL;
+	char *old_flabel = NULL;
+	bool ret         = true;
 
 	if (index >= sizeof(disks) / sizeof(disks[0]))
 		return false;
 
-	old_fname = disks[index].fname;
-	disks[index].fname = NULL;
+	old_fname  = disks[index].fname;
+	old_flabel = disks[index].flabel;
+
+	disks[index].fname          = NULL;
+	disks[index].flabel         = NULL;
 	disks[index].internal_index = 0;
 
 	if (info != NULL) {
+		char disk_label[PATH_MAX];
+		disk_label[0] = '\0';
+
 		disks[index].fname = strdup(info->path);
+
+		get_disk_label(disk_label, info->path, PATH_MAX);
+		disks[index].flabel = strdup(disk_label);
+
 		if (index == disk_current_index)
 			ret = disk_set_image_index(index);
 	}
 
 	if (old_fname != NULL)
 		free(old_fname);
+
+	if (old_flabel != NULL)
+		free(old_flabel);
 
 	return ret;
 }
@@ -954,6 +1070,64 @@ static bool disk_add_image_index(void)
 	return true;
 }
 
+static bool disk_set_initial_image(unsigned index, const char *path)
+{
+	if (index >= sizeof(disks) / sizeof(disks[0]))
+		return false;
+
+	if (!path || (*path == '\0'))
+		return false;
+
+	disk_initial_index = index;
+
+	strncpy(disk_initial_path, path, sizeof(disk_initial_path) - 1);
+	disk_initial_path[sizeof(disk_initial_path) - 1] = '\0';
+
+	return true;
+}
+
+static bool disk_get_image_path(unsigned index, char *path, size_t len)
+{
+	const char *fname = NULL;
+
+	if (len < 1)
+		return false;
+
+	if (index >= sizeof(disks) / sizeof(disks[0]))
+		return false;
+
+	fname = disks[index].fname;
+
+	if (!fname || (*fname == '\0'))
+		return false;
+
+	strncpy(path, fname, len - 1);
+	path[len - 1] = '\0';
+
+	return true;
+}
+
+static bool disk_get_image_label(unsigned index, char *label, size_t len)
+{
+	const char *flabel = NULL;
+
+	if (len < 1)
+		return false;
+
+	if (index >= sizeof(disks) / sizeof(disks[0]))
+		return false;
+
+	flabel = disks[index].flabel;
+
+	if (!flabel || (*flabel == '\0'))
+		return false;
+
+	strncpy(label, flabel, len - 1);
+	label[len - 1] = '\0';
+
+	return true;
+}
+
 static struct retro_disk_control_callback disk_control = {
 	.set_eject_state = disk_set_eject_state,
 	.get_eject_state = disk_get_eject_state,
@@ -964,16 +1138,18 @@ static struct retro_disk_control_callback disk_control = {
 	.add_image_index = disk_add_image_index,
 };
 
-// just in case, maybe a win-rt port in the future?
-#ifdef _WIN32
-#define SLASH '\\'
-#else
-#define SLASH '/'
-#endif
-
-#ifndef PATH_MAX
-#define PATH_MAX  4096
-#endif
+static struct retro_disk_control_ext_callback disk_control_ext = {
+	.set_eject_state = disk_set_eject_state,
+	.get_eject_state = disk_get_eject_state,
+	.get_image_index = disk_get_image_index,
+	.set_image_index = disk_set_image_index,
+	.get_num_images = disk_get_num_images,
+	.replace_image_index = disk_replace_image_index,
+	.add_image_index = disk_add_image_index,
+	.set_initial_image = disk_set_initial_image,
+	.get_image_path = disk_get_image_path,
+	.get_image_label = disk_get_image_label,
+};
 
 static char base_dir[1024];
 
@@ -997,8 +1173,16 @@ static bool read_m3u(const char *file)
 
 		if (line[0] != '\0')
 		{
+			char disk_label[PATH_MAX];
+			disk_label[0] = '\0';
+
 			snprintf(name, sizeof(name), "%s%c%s", base_dir, SLASH, line);
-			disks[disk_count++].fname = strdup(name);
+			disks[disk_count].fname = strdup(name);
+
+			get_disk_label(disk_label, name, PATH_MAX);
+			disks[disk_count].flabel = strdup(disk_label);
+
+			disk_count++;
 		}
 	}
 
@@ -1069,6 +1253,7 @@ static void set_retro_memmap(void)
 bool retro_load_game(const struct retro_game_info *info)
 {
 	size_t i;
+	unsigned int cd_index = 0;
 	bool is_m3u = (strcasestr(info->path, ".m3u") != NULL);
 
    struct retro_input_descriptor desc[] = {
@@ -1265,15 +1450,8 @@ bool retro_load_game(const struct retro_game_info *info)
 		plugins_opened = 0;
 	}
 
-	for (i = 0; i < sizeof(disks) / sizeof(disks[0]); i++) {
-		if (disks[i].fname != NULL) {
-			free(disks[i].fname);
-			disks[i].fname = NULL;
-		}
-		disks[i].internal_index = 0;
-	}
+	disk_init();
 
-	disk_current_index = 0;
 	extract_directory(base_dir, info->path, sizeof(base_dir));
 
 	if (is_m3u) {
@@ -1282,11 +1460,30 @@ bool retro_load_game(const struct retro_game_info *info)
 			return false;
 		}
 	} else {
+		char disk_label[PATH_MAX];
+		disk_label[0] = '\0';
+
 		disk_count = 1;
 		disks[0].fname = strdup(info->path);
+
+		get_disk_label(disk_label, info->path, PATH_MAX);
+		disks[0].flabel = strdup(disk_label);
 	}
 
-	set_cd_image(disks[0].fname);
+	/* If this is an M3U file, attempt to set the
+	 * initial disk image */
+	if (is_m3u &&
+		 (disk_initial_index > 0) &&
+		 (disk_initial_index < disk_count))	{
+		const char *fname = disks[disk_initial_index].fname;
+
+		if (fname && (*fname != '\0'))
+			if (strcmp(disk_initial_path, fname) == 0)
+				cd_index = disk_initial_index;
+	}
+
+	set_cd_image(disks[cd_index].fname);
+	disk_current_index = cd_index;
 
 	/* have to reload after set_cd_image for correct cdr plugin */
 	if (LoadPlugins() == -1) {
@@ -1300,6 +1497,69 @@ bool retro_load_game(const struct retro_game_info *info)
 	if (OpenPlugins() == -1) {
 		log_cb(RETRO_LOG_INFO, "failed to open plugins\n");
 		return false;
+	}
+
+	/* Handle multi-disk images (i.e. PBP)
+	 * > Cannot do this until after OpenPlugins() is
+	 *   called (since this sets the value of
+	 *   cdrIsoMultidiskCount) */
+	if (!is_m3u && (cdrIsoMultidiskCount > 1)) {
+		disk_count = cdrIsoMultidiskCount < 8 ? cdrIsoMultidiskCount : 8;
+
+		/* Small annoyance: We need to change the label
+		 * of disk 0, so have to clear existing entries */
+		if (disks[0].fname != NULL)
+			free(disks[0].fname);
+		disks[0].fname = NULL;
+
+		if (disks[0].flabel != NULL)
+			free(disks[0].flabel);
+		disks[0].flabel = NULL;
+
+		for (i = 0; i < sizeof(disks) / sizeof(disks[0]) && i < cdrIsoMultidiskCount; i++) {
+			char disk_name[PATH_MAX];
+			char disk_label[PATH_MAX];
+			disk_name[0]  = '\0';
+			disk_label[0] = '\0';
+
+			disks[i].fname = strdup(info->path);
+
+			get_disk_label(disk_name, info->path, PATH_MAX);
+			snprintf(disk_label, sizeof(disk_label), "%s #%u", disk_name, (unsigned)i + 1);
+			disks[i].flabel = strdup(disk_label);
+
+			disks[i].internal_index = i;
+		}
+
+		/* This is not an M3U file, so initial disk
+		 * image has not yet been set - attempt to
+		 * do so now */
+		if ((disk_initial_index > 0) &&
+			 (disk_initial_index < disk_count))	{
+			const char *fname = disks[disk_initial_index].fname;
+
+			if (fname && (*fname != '\0'))
+				if (strcmp(disk_initial_path, fname) == 0)
+					cd_index = disk_initial_index;
+		}
+
+		if (cd_index > 0) {
+			CdromId[0]    = '\0';
+			CdromLabel[0] = '\0';
+
+			cdrIsoMultidiskSelect = disks[cd_index].internal_index;
+			disk_current_index    = cd_index;
+			set_cd_image(disks[cd_index].fname);
+
+			if (ReloadCdromPlugin() < 0) {
+				log_cb(RETRO_LOG_INFO, "failed to reload cdr plugins\n");
+				return false;
+			}
+			if (CDR_open() < 0) {
+				log_cb(RETRO_LOG_INFO, "failed to open cdr plugin\n");
+				return false;
+			}
+		}
 	}
 
 	plugin_call_rearmed_cbs();
@@ -1317,15 +1577,6 @@ bool retro_load_game(const struct retro_game_info *info)
 		return false;
 	}
 	emu_on_new_cd(0);
-
-	// multidisk images
-	if (!is_m3u) {
-		disk_count = cdrIsoMultidiskCount < 8 ? cdrIsoMultidiskCount : 8;
-		for (i = 1; i < sizeof(disks) / sizeof(disks[0]) && i < cdrIsoMultidiskCount; i++) {
-			disks[i].fname = strdup(info->path);
-			disks[i].internal_index = i;
-		}
-	}
 
 	set_retro_memmap();
 
@@ -1388,7 +1639,9 @@ static void update_variables(bool in_flight)
 {
    struct retro_variable var;
    int i;
+#ifdef GPU_PEOPS
    int gpu_peops_fix = 0;
+#endif
 
    var.value = NULL;
    var.key = "pcsx_rearmed_frameskip";
@@ -1434,6 +1687,18 @@ static void update_variables(bool in_flight)
    }
 
    var.value = NULL;
+   var.key = "pcsx_rearmed_analog_axis_modifier";
+   axis_bounds_modifier = true;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) || var.value)
+   {
+      if (strcmp(var.value, "square") == 0) {
+        axis_bounds_modifier = true;
+	  } else if (strcmp(var.value, "circle") == 0) {
+        axis_bounds_modifier = false;
+	  }
+   }
+
+   var.value = NULL;
    var.key = "pcsx_rearmed_vibration";
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) || var.value)
@@ -1467,7 +1732,7 @@ static void update_variables(bool in_flight)
       }
    }
 
-#ifdef __ARM_NEON__
+#ifdef GPU_NEON
    var.value = "NULL";
    var.key = "pcsx_rearmed_neon_interlace_enable";
 
@@ -1531,13 +1796,18 @@ static void update_variables(bool in_flight)
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) || var.value)
    {
       R3000Acpu *prev_cpu = psxCpu;
+#if defined(LIGHTREC)
+      bool can_use_dynarec = found_bios;
+#else
+      bool can_use_dynarec = 1;
+#endif
 
 #ifdef _3DS
       if(!__ctr_svchax)
          Config.Cpu = CPU_INTERPRETER;
       else
 #endif
-      if (strcmp(var.value, "disabled") == 0)
+      if (strcmp(var.value, "disabled") == 0 || !can_use_dynarec)
          Config.Cpu = CPU_INTERPRETER;
       else if (strcmp(var.value, "enabled") == 0)
          Config.Cpu = CPU_DYNAREC;
@@ -1609,6 +1879,18 @@ static void update_variables(bool in_flight)
       else if (strcmp(var.value, "enabled") == 0)
          Config.VSyncWA = 1;
    }
+
+#ifndef _WIN32
+   var.value = NULL;
+   var.key = "pcsx_rearmed_async_cd";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) || var.value)
+   {
+      if (strcmp(var.value, "async") == 0)
+        Config.AsyncCD = 1;
+      else
+        Config.AsyncCD = 0;
+   }
+#endif
 
    var.value = NULL;
    var.key = "pcsx_rearmed_noxadecoding";
@@ -1918,7 +2200,8 @@ static void update_variables(bool in_flight)
             }
          }
       }
-#ifndef DRC_DISABLE
+
+#if defined(LIGHTREC) || defined(NEW_DYNAREC)
       var.value = "NULL";
       var.key = "pcsx_rearmed_psxclock";
       if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) || var.value)
@@ -1955,6 +2238,23 @@ static uint16_t get_analog_button(int16_t ret, retro_input_state_t input_state_c
 	}
 
 	return button;
+}
+
+unsigned char axis_range_modifier(int16_t axis_value, bool is_square) {
+	float modifier_axis_range = 0;
+
+	if(is_square) {
+		modifier_axis_range = round((axis_value >> 8) / 0.785) + 128;
+		if(modifier_axis_range < 0) {
+			modifier_axis_range = 0;
+		} else if(modifier_axis_range > 255) {
+			modifier_axis_range = 255;
+		}
+	} else {
+		modifier_axis_range = MIN(((axis_value >> 8) + 128), 255);
+	}
+
+	return modifier_axis_range;
 }
 
 void retro_run(void)
@@ -1996,7 +2296,10 @@ void retro_run(void)
 		frame_count = 0;
 
 	input_poll_cb();
-
+#ifdef PORTANDROID
+	cb_sound_driver_fill();
+	cb_itf.cb_frame_audio_update(cb_context.frame_index, cb_snd_frame_len);
+#endif
 	bool updated = false;
 	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
 		update_variables(true);
@@ -2229,10 +2532,10 @@ void retro_run(void)
 			// Query analog inputs
 			if (in_type[i] == PSE_PAD_TYPE_ANALOGJOY || in_type[i] == PSE_PAD_TYPE_ANALOGPAD)
 			{
-				in_analog_left[i][0] = MIN((input_state_cb(i, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X) / 255) + 128, 255);
-				in_analog_left[i][1] = MIN((input_state_cb(i, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y) / 255) + 128, 255);
-				in_analog_right[i][0] = MIN((input_state_cb(i, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X) / 255) + 128, 255);
-				in_analog_right[i][1] = MIN((input_state_cb(i, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y) / 255) + 128, 255);
+				in_analog_left[i][0] = axis_range_modifier(input_state_cb(i, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X), axis_bounds_modifier);
+				in_analog_left[i][1] = axis_range_modifier(input_state_cb(i, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y), axis_bounds_modifier);
+				in_analog_right[i][0] = axis_range_modifier(input_state_cb(i, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X), axis_bounds_modifier);
+				in_analog_right[i][1] = axis_range_modifier(input_state_cb(i, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y), axis_bounds_modifier);
 			}
 		}
 	}
@@ -2377,14 +2680,27 @@ static void loadPSXBios(void)
 		{
 			unsigned i;
 			snprintf(Config.BiosDir, sizeof(Config.BiosDir), "%s", dir);
-
+#ifdef PORTANDROID
+			//Check if bios specified
+			if(cb_settings.bios_path) {
+				found_bios = try_use_bios(path);
+			}
+			if(!found_bios) {
+				for (i = 0; i < sizeof(bios) / sizeof(bios[0]); i++) {
+					snprintf(path, sizeof(path), "%s%c%s.bin", dir, SLASH, bios[i]);
+					found_bios = try_use_bios(path);
+					if (found_bios)
+						break;
+				}
+			}
+#else
 			for (i = 0; i < sizeof(bios) / sizeof(bios[0]); i++) {
 				snprintf(path, sizeof(path), "%s%c%s.bin", dir, SLASH, bios[i]);
 				found_bios = try_use_bios(path);
 				if (found_bios)
 					break;
 			}
-
+#endif
 			if (!found_bios)
 				found_bios = find_any_bios(dir, path, sizeof(path));
 		}
@@ -2407,6 +2723,7 @@ static void loadPSXBios(void)
 
 void retro_init(void)
 {
+	unsigned dci_version = 0;
 	struct retro_rumble_interface rumble;
 	int ret;
 
@@ -2441,7 +2758,7 @@ void retro_init(void)
 
 #ifdef _3DS
    vout_buf = linearMemAlign(VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2, 0x80);
-#elif defined(_POSIX_C_SOURCE) && (_POSIX_C_SOURCE >= 200112L) && !defined(VITA)
+#elif defined(_POSIX_C_SOURCE) && (_POSIX_C_SOURCE >= 200112L) && !defined(VITA) && !defined(__SWITCH__)
 	posix_memalign(&vout_buf, 16, VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2);
 #else
 	vout_buf = malloc(VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2);
@@ -2452,7 +2769,13 @@ void retro_init(void)
 	loadPSXBios();
 
 	environ_cb(RETRO_ENVIRONMENT_GET_CAN_DUPE, &vout_can_dupe);
-	environ_cb(RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE, &disk_control);
+
+	disk_initial_index   = 0;
+	disk_initial_path[0] = '\0';
+	if (environ_cb(RETRO_ENVIRONMENT_GET_DISK_CONTROL_INTERFACE_VERSION, &dci_version) && (dci_version >= 1))
+		environ_cb(RETRO_ENVIRONMENT_SET_DISK_CONTROL_EXT_INTERFACE, &disk_control_ext);
+	else
+		environ_cb(RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE, &disk_control);
 
 	rumble_cb = NULL;
 	if (environ_cb(RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE, &rumble))
@@ -2497,6 +2820,10 @@ void retro_deinit(void)
   deinit_vita_mmap();
 #endif
    libretro_supports_bitmasks = false;
+
+	/* Have to reset disks struct, otherwise
+	 * fnames/flabels will leak memory */
+	disk_init();
 }
 
 #ifdef VITA

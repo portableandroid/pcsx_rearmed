@@ -1,5 +1,5 @@
 /*
- * (C) Gra≈ævydas "notaz" Ignotas, 2011
+ * (C) Graûvydas "notaz" Ignotas, 2011
  *
  * This work is licensed under the terms of GNU GPL version 2 or later.
  * See the COPYING file in the top-level directory.
@@ -290,10 +290,7 @@ FUNCTION(gteRTPT_neon): @ r0=CP2 (d,c),
 
     rtpx_preload
 
-    @vmov.i32    d22, #0x7fffffff @FixMe
-    vmov.i32 d22, #0x00ffffff @ Fix the invalid operand
-    vorr.i32 d22, #0x7f000000 @ Fix the invalid operand
-
+    vmvn.i32    d22, #0x80000000 @ #0x7fffffff
     vmov.i32    d23, #0x80000000
     mov         r3, #3         @ counter
     mov         r2, r0         @ VXYZ(0)

@@ -267,6 +267,17 @@ struct retro_core_option_definition option_defs_us[] = {
       "linear",
    },
    {
+      "pcsx_rearmed_analog_axis_modifier",
+      "Analog axis bounds.",
+      "Range bounds for analog axis. Square bounds help controllers with highly circular ranges that are unable to fully saturate the x and y axis at 45degree deflections.",
+      {
+         { "circle", NULL },
+         { "square", NULL },
+         { NULL, NULL },
+      },
+      "circle",
+   },
+   {
       "pcsx_rearmed_vibration",
       "Enable Vibration",
       "Enables vibration feedback for controllers that supports vibration features.",
@@ -530,7 +541,11 @@ struct retro_core_option_definition option_defs_us[] = {
          { "enabled",  NULL },
          { NULL, NULL },
       },
+#if defined HAVE_LIBNX || defined _3DS
+	  "disabled",
+#else
       "enabled",
+#endif
    },
 
 #ifndef DRC_DISABLE
@@ -635,7 +650,7 @@ struct retro_core_option_definition option_defs_us[] = {
    },
 #endif /* DRC_DISABLE */
 
-#ifdef __ARM_NEON__
+#ifdef GPU_NEON
    {
       "pcsx_rearmed_neon_interlace_enable",
       "Enable Interlacing Mode",
@@ -669,7 +684,7 @@ struct retro_core_option_definition option_defs_us[] = {
       },
       "disabled",
    },
-#endif /* __ARM_NEON__ */
+#endif /* GPU_NEON */
 
    {
       "pcsx_rearmed_duping_enable",
@@ -946,7 +961,19 @@ struct retro_core_option_definition option_defs_us[] = {
       },
       "disabled",
    },
-
+#ifndef _WIN32
+   {
+      "pcsx_rearmed_async_cd",
+      "CD Access Method (Restart)",
+      "Select method used to read data from content disk images. 'Synchronous' mimics original hardware. 'Asynchronous' can reduce stuttering on devices with slow storage.",
+      {
+         { "sync", "Synchronous" },
+         { "async",  "Asynchronous" },
+         { NULL, NULL},
+      },
+      "sync",
+   },
+#endif
    /* ADVANCED OPTIONS */
    {
       "pcsx_rearmed_noxadecoding",

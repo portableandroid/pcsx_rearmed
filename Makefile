@@ -6,7 +6,7 @@ CFLAGS += -Wall -Iinclude -ffast-math
 ifeq ($(DEBUG), 1)
 CFLAGS += -O0 -ggdb
 else
-ifeq ($(platform), vita)
+ifeq ($(platform), $(filter $(platform), vita ctr))
 CFLAGS += -O3 -DNDEBUG
 else
 CFLAGS += -O2 -DNDEBUG
@@ -78,16 +78,43 @@ endif
 libpcsxcore/psxbios.o: CFLAGS += -Wno-nonnull
 
 # dynarec
-ifeq "$(USE_DYNAREC)" "1"
-OBJS += libpcsxcore/new_dynarec/new_dynarec.o libpcsxcore/new_dynarec/arm/linkage_arm.o
-OBJS += libpcsxcore/new_dynarec/backends/psx/pcsxmem.o
+ifeq "$(DYNAREC)" "lightrec"
+CFLAGS += -Ideps/lightning/include -Ideps/lightrec \
+		  -DLIGHTREC -DLIGHTREC_STATIC
+OBJS += libpcsxcore/lightrec/plugin.o
+OBJS += deps/lightning/lib/jit_disasm.o \
+		deps/lightning/lib/jit_memory.o \
+		deps/lightning/lib/jit_names.o \
+		deps/lightning/lib/jit_note.o \
+		deps/lightning/lib/jit_print.o \
+		deps/lightning/lib/jit_size.o \
+		deps/lightning/lib/lightning.o \
+		deps/lightrec/blockcache.o \
+		deps/lightrec/disassembler.o \
+		deps/lightrec/emitter.o \
+		deps/lightrec/interpreter.o \
+		deps/lightrec/lightrec.o \
+		deps/lightrec/memmanager.o \
+		deps/lightrec/optimizer.o \
+		deps/lightrec/regcache.o \
+		deps/lightrec/recompiler.o
+ifeq ($(MMAP_WIN32),1)
+CFLAGS += -Ideps/mman
+OBJS += deps/mman/mman.o
+endif
+else ifeq "$(DYNAREC)" "ari64"
+CFLAGS += -DNEW_DYNAREC
+OBJS += libpcsxcore/new_dynarec/backends/psx/emu_if.o \
+		libpcsxcore/new_dynarec/new_dynarec.o \
+		libpcsxcore/new_dynarec/arm/linkage_arm.o \
+		libpcsxcore/new_dynarec/backends/psx/pcsxmem.o
+libpcsxcore/new_dynarec/new_dynarec.o: libpcsxcore/new_dynarec/arm/assem_arm.c \
+	libpcsxcore/new_dynarec/backends/psx/pcsxmem_inline.c
 else
+OBJS += libpcsxcore/new_dynarec/backends/psx/emu_if.o
 libpcsxcore/new_dynarec/backends/psx/emu_if.o: CFLAGS += -DDRC_DISABLE
 frontend/libretro.o: CFLAGS += -DDRC_DISABLE
 endif
-OBJS += libpcsxcore/new_dynarec/backends/psx/emu_if.o
-libpcsxcore/new_dynarec/new_dynarec.o: libpcsxcore/new_dynarec/arm/assem_arm.c \
-	libpcsxcore/new_dynarec/backends/psx/pcsxmem_inline.c
 ifdef DRC_DBG
 libpcsxcore/new_dynarec/backends/psx/emu_if.o: CFLAGS += -D_FILE_OFFSET_BITS=64
 CFLAGS += -DDRC_DBG
@@ -137,8 +164,13 @@ endif
 OBJS += plugins/gpulib/gpu.o plugins/gpulib/vout_pl.o
 ifeq "$(BUILTIN_GPU)" "neon"
 CFLAGS += -DGPU_NEON
-OBJS += plugins/gpu_neon/psx_gpu_if.o plugins/gpu_neon/psx_gpu/psx_gpu_arm_neon.o
+OBJS += plugins/gpu_neon/psx_gpu_if.o
+ifeq "$(HAVE_NEON)" "1"
+OBJS += plugins/gpu_neon/psx_gpu/psx_gpu_arm_neon.o
 plugins/gpu_neon/psx_gpu_if.o: CFLAGS += -DNEON_BUILD -DTEXTURE_CACHE_4BPP -DTEXTURE_CACHE_8BPP
+else
+plugins/gpu_neon/psx_gpu_if.o: CFLAGS += -DTEXTURE_CACHE_4BPP -DTEXTURE_CACHE_8BPP
+endif
 plugins/gpu_neon/psx_gpu_if.o: plugins/gpu_neon/psx_gpu/*.c
 endif
 ifeq "$(BUILTIN_GPU)" "peops"
@@ -284,8 +316,10 @@ CFLAGS += -Ilibretro-common/include
 CFLAGS += -DFRONTEND_SUPPORTS_RGB565
 CFLAGS += -DHAVE_LIBRETRO
 
+ifneq ($(DYNAREC),lightrec)
 ifeq ($(MMAP_WIN32),1)
 OBJS += libpcsxcore/memmap_win32.o
+endif
 endif
 endif
 

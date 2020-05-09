@@ -662,6 +662,11 @@ int LoadState(const char *file) {
 	if (Config.HLE)
 		psxBiosInit();
 
+#if defined(LIGHTREC)
+	if (Config.Cpu != CPU_INTERPRETER)
+		psxCpu->Clear(0, UINT32_MAX); //clear all
+	else
+#endif
 	psxCpu->Reset();
 	SaveFuncs.seek(f, 128 * 96 * 3, SEEK_CUR);
 
@@ -755,7 +760,7 @@ int RecvPcsxInfo() {
 	NET_recvData(&Config.Cpu, sizeof(Config.Cpu), PSE_NET_BLOCKING);
 	if (tmp != Config.Cpu) {
 		psxCpu->Shutdown();
-#ifdef PSXREC
+#if defined(NEW_DYNAREC) || defined(LIGHTREC)
 		if (Config.Cpu == CPU_INTERPRETER) psxCpu = &psxInt;
 		else psxCpu = &psxRec;
 #else

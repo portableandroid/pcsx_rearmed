@@ -40,10 +40,11 @@ extern "C" {
 #include <math.h>
 #include <time.h>
 #include <ctype.h>
+#ifndef __SWITCH__
 #include <sys/types.h>
+#endif
 #include <assert.h>
 
-#ifndef PORTANDROID
 // Define types
 typedef int8_t s8;
 typedef int16_t s16;
@@ -55,7 +56,8 @@ typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
-#else
+#ifdef PORTANDROID
+#define  _cb_type_lock_
 #include "cb_interface.h"
 #include "emu_init.h"
 #endif
@@ -125,6 +127,7 @@ typedef struct {
 	boolean Mdec;
 	boolean PsxAuto;
 	boolean Cdda;
+	boolean AsyncCD;
 	boolean HLE;
 	boolean SlowBoot;
 	boolean Debug;
