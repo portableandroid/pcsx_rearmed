@@ -48,13 +48,7 @@
 #ifdef PORTANDROID
 #define _cb_type_lock_
 #include "emu_retro.h"
-/* sound driver */
-extern void cb_sound_driver_fill(void);
-extern int cb_sound_driver_init(void);
-extern void cb_sound_driver_finish(void);
-extern int cb_sound_driver_busy(void);
-extern void cb_sound_driver_feed(void *buf, int bytes);
-extern u32 cb_snd_frame_len;
+#include "../../emu_pcsx_main.h"
 #endif
 
 #define PORTS_NUMBER 8
@@ -2296,10 +2290,6 @@ void retro_run(void)
 		frame_count = 0;
 
 	input_poll_cb();
-#ifdef PORTANDROID
-	cb_sound_driver_fill();
-	cb_itf.cb_frame_audio_update(cb_context.frame_index, cb_snd_frame_len);
-#endif
 	bool updated = false;
 	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
 		update_variables(true);

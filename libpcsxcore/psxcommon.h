@@ -56,12 +56,6 @@ typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
-#ifdef PORTANDROID
-#define  _cb_type_lock_
-#include "cb_interface.h"
-#include "emu_init.h"
-#endif
-
 typedef intptr_t sptr;
 typedef uintptr_t uptr;
 

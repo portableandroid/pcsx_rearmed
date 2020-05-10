@@ -28,6 +28,11 @@
 #include "ppf.h"
 #include <zlib.h>
 
+#ifdef PORTANDROID
+#define _cb_type_lock_
+#include "emu_retro.h"
+#endif
+
 char CdromId[10] = "";
 char CdromLabel[33] = "";
 
