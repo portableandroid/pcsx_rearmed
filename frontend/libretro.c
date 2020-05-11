@@ -2675,7 +2675,7 @@ static void loadPSXBios(void)
 #ifdef PORTANDROID
 			//Check if bios specified
 			if(cb_settings.bios_path) {
-				found_bios = try_use_bios(path);
+				found_bios = try_use_bios(cb_settings.bios_path);
 			}
 			if(!found_bios) {
 				for (i = 0; i < sizeof(bios) / sizeof(bios[0]); i++) {
