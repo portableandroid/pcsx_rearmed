@@ -42,6 +42,7 @@ static struct lightrec_state *lightrec_state;
 static char *name = "retroarch.exe";
 
 static bool use_lightrec_interpreter;
+static bool use_pcsx_interpreter = 0;
 static bool lightrec_debug;
 static bool lightrec_very_debug;
 static u32 lightrec_begin_cycles;
@@ -496,6 +497,9 @@ static void print_for_big_ass_debugger(void)
 	printf("\n");
 }
 
+
+extern void intExecuteBlock();
+
 static u32 old_cycle_counter;
 
 static void lightrec_plugin_execute_block(void)
@@ -503,27 +507,33 @@ static void lightrec_plugin_execute_block(void)
 	u32 old_pc = psxRegs.pc;
 	u32 flags;
 
-	lightrec_reset_cycle_count(lightrec_state, psxRegs.cycle);
-	lightrec_restore_registers(lightrec_state, psxRegs.GPR.r);
+	if (use_pcsx_interpreter) {
+		intExecuteBlock();
+	} else {
+		lightrec_reset_cycle_count(lightrec_state, psxRegs.cycle);
+		lightrec_restore_registers(lightrec_state, psxRegs.GPR.r);
 
-	if (use_lightrec_interpreter)
-		psxRegs.pc = lightrec_run_interpreter(lightrec_state, psxRegs.pc);
-	else
-		psxRegs.pc = lightrec_execute_one(lightrec_state, psxRegs.pc);
+		if (use_lightrec_interpreter)
+			psxRegs.pc = lightrec_run_interpreter(lightrec_state,
+							      psxRegs.pc);
+		else
+			psxRegs.pc = lightrec_execute_one(lightrec_state,
+							  psxRegs.pc);
 
-	psxRegs.cycle = lightrec_current_cycle_count(lightrec_state);
+		psxRegs.cycle = lightrec_current_cycle_count(lightrec_state);
 
-	lightrec_dump_registers(lightrec_state, psxRegs.GPR.r);
-	flags = lightrec_exit_flags(lightrec_state);
+		lightrec_dump_registers(lightrec_state, psxRegs.GPR.r);
+		flags = lightrec_exit_flags(lightrec_state);
 
-	if (flags & LIGHTREC_EXIT_SEGFAULT) {
-		fprintf(stderr, "Exiting at cycle 0x%08x\n",
-			psxRegs.cycle);
-		exit(1);
+		if (flags & LIGHTREC_EXIT_SEGFAULT) {
+			fprintf(stderr, "Exiting at cycle 0x%08x\n",
+				psxRegs.cycle);
+			exit(1);
+		}
+
+		if (flags & LIGHTREC_EXIT_SYSCALL)
+			psxException(0x20, 0);
 	}
-
-	if (flags & LIGHTREC_EXIT_SYSCALL)
-		psxException(0x20, 0);
 
 	psxBranchTest();
 
@@ -539,8 +549,9 @@ static void lightrec_plugin_execute_block(void)
 	}
 
 	if ((psxRegs.cycle & ~0xfffffff) != old_cycle_counter) {
-		printf("RAM usage: IR %u KiB, CODE %u KiB, "
+		printf("RAM usage: Lightrec %u KiB, IR %u KiB, CODE %u KiB, "
 		       "MIPS %u KiB, TOTAL %u KiB, avg. IPI %f\n",
+		       lightrec_get_mem_usage(MEM_FOR_LIGHTREC) / 1024,
 		       lightrec_get_mem_usage(MEM_FOR_IR) / 1024,
 		       lightrec_get_mem_usage(MEM_FOR_CODE) / 1024,
 		       lightrec_get_mem_usage(MEM_FOR_MIPS_CODE) / 1024,
