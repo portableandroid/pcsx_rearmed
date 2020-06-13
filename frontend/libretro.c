@@ -96,6 +96,7 @@ static int show_advanced_gpu_peops_settings = -1;
 static int show_advanced_gpu_unai_settings  = -1;
 #endif
 static int show_other_input_settings = -1;
+static float mouse_sensitivity = 1.0f;
 
 static unsigned previous_width = 0;
 static unsigned previous_height = 0;
@@ -118,6 +119,7 @@ int in_type[8] = {
 int in_analog_left[8][2] = {{ 127, 127 },{ 127, 127 },{ 127, 127 },{ 127, 127 },{ 127, 127 },{ 127, 127 },{ 127, 127 },{ 127, 127 }};
 int in_analog_right[8][2] = {{ 127, 127 },{ 127, 127 },{ 127, 127 },{ 127, 127 },{ 127, 127 },{ 127, 127 },{ 127, 127 },{ 127, 127 }};
 unsigned short in_keystate[PORTS_NUMBER];
+int in_mouse[8][2];
 int multitap1 = 0;
 int multitap2 = 0;
 int in_enable_vibration = 1;
@@ -612,6 +614,8 @@ static void update_controller_port_variable(unsigned port)
 			in_type[port] = PSE_PAD_TYPE_NEGCON;
 		else if (strcmp(var.value, "guncon") == 0)
 			in_type[port] = PSE_PAD_TYPE_GUNCON;
+      else if (strcmp(var.value, "mouse") == 0)
+         in_type[port] = PSE_PAD_TYPE_MOUSE;
 		else if (strcmp(var.value, "none") == 0)
 			in_type[port] = PSE_PAD_TYPE_NONE;
 		// else 'default' case, do nothing
@@ -2122,6 +2126,13 @@ static void update_variables(bool in_flight)
    }
 #endif /* NEW_DYNAREC */
 
+   var.value = NULL;
+   var.key = "pcsx_rearmed_input_sensitivity";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      mouse_sensitivity = atof(var.value);
+   }
+
    var.key = "pcsx_rearmed_show_other_input_settings";
    var.value = NULL;
 
@@ -2408,6 +2419,32 @@ static void update_input_negcon(int port, int ret)
    in_analog_left[port][1] = get_analog_button(ret, input_state_cb, port, RETRO_DEVICE_ID_JOYPAD_L);
 }
 
+static void update_input_mouse(int port, int ret)
+{
+   float raw_x = input_state_cb(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_X);
+   float raw_y = input_state_cb(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_Y);
+
+   int x = (int)roundf(raw_x * mouse_sensitivity);
+   int y = (int)roundf(raw_y * mouse_sensitivity);
+
+   if (x > 127) x = 127;
+   else if (x < -128) x = -128;
+
+   if (y > 127) y = 127;
+   else if (y < -128) y = -128;
+
+   in_mouse[port][0] = x; /* -128..+128 left/right movement, 0 = no movement */
+   in_mouse[port][1] = y; /* -128..+128 down/up movement, 0 = no movement    */
+
+   /* left mouse button state */
+   if (input_state_cb(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_LEFT))
+      in_keystate[port] |= 1 << 11;
+
+   /* right mouse button state */
+   if (input_state_cb(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_RIGHT))
+      in_keystate[port] |= 1 << 10;
+}
+
 static void update_input(void)
 {
    // reset all keystate, query libretro for keystate
@@ -2443,6 +2480,9 @@ static void update_input(void)
       case PSE_PAD_TYPE_NEGCON:
          update_input_negcon(i, ret);
          break;
+      case PSE_PAD_TYPE_MOUSE:
+         update_input_mouse(i, ret);
+         break;      
       default:
 			// Query digital inputs
 			for (j = 0; j < RETRO_PSX_MAP_LEN; j++)
