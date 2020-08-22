@@ -937,7 +937,7 @@ struct retro_core_option_definition option_defs_us[] = {
          { "enabled",  NULL },
          { NULL, NULL},
       },
-      "enabled",
+      "disabled",
    },
    {
       "pcsx_rearmed_gpu_unai_ilace_force",
@@ -954,6 +954,17 @@ struct retro_core_option_definition option_defs_us[] = {
       "pcsx_rearmed_gpu_unai_pixel_skip",
       "(GPU) Enable Pixel Skip",
       NULL,
+      {
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL},
+      },
+      "disabled",
+   },
+   {
+      "pcsx_rearmed_gpu_unai_scale_hires",
+      "(GPU) Enable Hi-Res Downscaling",
+      "When enabled, will scale hi-res modes to 320x240, skipping unrendered pixels.",
       {
          { "disabled", NULL },
          { "enabled",  NULL },

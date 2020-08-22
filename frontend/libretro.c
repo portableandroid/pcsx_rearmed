@@ -2016,6 +2016,17 @@ static void update_variables(bool in_flight)
          pl_rearmed_cbs.gpu_unai.blending = 1;
    }
 
+   var.key = "pcsx_rearmed_gpu_unai_scale_hires";
+   var.value = NULL;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (strcmp(var.value, "disabled") == 0)
+         pl_rearmed_cbs.gpu_unai.scale_hires = 0;
+      else if (strcmp(var.value, "enabled") == 0)
+         pl_rearmed_cbs.gpu_unai.scale_hires = 1;
+   }
+
    var.key = "pcsx_rearmed_show_gpu_unai_settings";
    var.value = NULL;
 
@@ -2031,17 +2042,18 @@ static void update_variables(bool in_flight)
       {
          unsigned i;
          struct retro_core_option_display option_display;
-         char gpu_unai_option[5][40] = {
+         char gpu_unai_option[6][40] = {
             "pcsx_rearmed_gpu_unai_blending",
             "pcsx_rearmed_gpu_unai_lighting",
             "pcsx_rearmed_gpu_unai_fast_lighting",
             "pcsx_rearmed_gpu_unai_ilace_force",
-            "pcsx_rearmed_gpu_unai_pixel_skip"
+            "pcsx_rearmed_gpu_unai_pixel_skip",
+            "pcsx_rearmed_gpu_unai_scale_hires"
          };
 
          option_display.visible = show_advanced_gpu_unai_settings;
 
-         for (i = 0; i < 5; i++)
+         for (i = 0; i < 6; i++)
          {
             option_display.key = gpu_unai_option[i];
             environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
@@ -2913,4 +2925,18 @@ void SysPrintf(const char *fmt, ...)
 
 	if (log_cb)
 		log_cb(RETRO_LOG_INFO, "%s", msg);
+}
+
+/* Prints debug-level logs */
+void SysDLog(const char *fmt, ...)
+{
+   va_list list;
+   char msg[512];
+
+   va_start(list, fmt);
+   vsprintf(msg, fmt, list);
+   va_end(list);
+
+   if (log_cb)
+      log_cb(RETRO_LOG_DEBUG, "%s", msg);
 }
