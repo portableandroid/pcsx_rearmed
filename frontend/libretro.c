@@ -2287,38 +2287,33 @@ static void update_input_guncon(int port, int ret)
 	//RETRO_DEVICE_ID_LIGHTGUN_AUX_B
 	//Though not sure these are hooked up properly on the Pi
 
-	//ToDo
-    //Put the controller index back to port instead of hardcoding to 1 when the libretro overlay crash bug is fixed
-	//This is required for 2 player
-			
 	//GUNCON has 3 controls, Trigger,A,B which equal Circle,Start,Cross
 			
 	// Trigger
     //The 1 is hardcoded instead of port to prevent the overlay mouse button libretro crash bug
-	if (input_state_cb(1, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_LEFT))
+   if (input_state_cb(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_LEFT))
 	{
 		in_keystate[port] |= (1 << DKEY_CIRCLE);
 	}
 	// A
-    if (input_state_cb(1, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_RIGHT))
+   if (input_state_cb(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_RIGHT))
     {
     	in_keystate[port] |= (1 << DKEY_START);
 	}
 	// B
-    if (input_state_cb(1, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_MIDDLE))
+   if (input_state_cb(port, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_MIDDLE))
     {
     	in_keystate[port] |= (1 << DKEY_CROSS);
 	}
 			
-    //The 1 is hardcoded instead of port to prevent the overlay mouse button libretro crash bug
-	int gunx = input_state_cb(1, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
-	int guny = input_state_cb(1, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
+   int gunx = input_state_cb(port, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
+   int guny = input_state_cb(port, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
 			
 	//Mouse range is -32767 -> 32767
 	//1% is about 655
 	//Use the left analog stick field to store the absolute coordinates
-	in_analog_left[0][0] = (gunx*GunconAdjustRatioX) + (GunconAdjustX * 655);
-	in_analog_left[0][1] = (guny*GunconAdjustRatioY) + (GunconAdjustY * 655);
+   in_analog_left[port][0] = (gunx * GunconAdjustRatioX) + (GunconAdjustX * 655);
+   in_analog_left[port][1] = (guny * GunconAdjustRatioY) + (GunconAdjustY * 655);
 }
 
 static void update_input_negcon(int port, int ret)
@@ -2662,11 +2657,34 @@ static int init_memcards(void)
 	struct retro_variable var = { .key="pcsx_rearmed_memcard2", .value=NULL };
 	static const char CARD2_FILE[] = "pcsx-card2.mcd";
 
+#ifdef PORTANDROID
+	// Set card 1
+	if (environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &dir) && dir)
+	{
+		if (strlen(dir) + strlen(CARD2_FILE) + 2 > sizeof(Config.Mcd1))
+		{
+			SysPrintf("Path '%s' is too long. Cannot use memcard 1. Use a shorter path.\n", dir);
+		}
+		else
+		{
+			McdDisable[0] = 0;
+			snprintf(Config.Mcd1, sizeof(Config.Mcd1), "%s/%s", dir, "card1.mcd");
+			SysPrintf("Use memcard 1: %s\n", Config.Mcd1);
+		}
+	}
+	else
+	{
+		SysPrintf("Could not get save directory! Could not create memcard 2.");
+		// skip file io operations for memcard1 like SaveMcd
+		snprintf(Config.Mcd1, sizeof(Config.Mcd1), "none");
+	}
+#else
 	// Memcard2 will be handled and is re-enabled if needed using core
 	// operations.
 	// Memcard1 is handled by libretro, doing this will set core to
 	// skip file io operations for memcard1 like SaveMcd
 	snprintf(Config.Mcd1, sizeof(Config.Mcd1), "none");
+#endif
 	snprintf(Config.Mcd2, sizeof(Config.Mcd2), "none");
 	init_memcard(Mcd1Data);
 	// Memcard 2 is managed by the emulator on the filesystem,

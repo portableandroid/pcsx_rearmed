@@ -477,7 +477,10 @@ static int parsecue(const char *isofile) {
 	strncpy(cuename, isofile, sizeof(cuename));
 	cuename[MAXPATHLEN - 1] = '\0';
 	if (strlen(cuename) >= 4) {
-		strcpy(cuename + strlen(cuename) - 4, ".cue");
+		// If 'isofile' is a '.cd<X>' file, use it as a .cue file
+		//  and don't try to search the additional .cue file
+		if (strncasecmp(cuename + strlen(cuename) - 4, ".cd", 3) != 0 )
+			strcpy(cuename + strlen(cuename) - 4, ".cue");
 	}
 	else {
 		return -1;
@@ -604,9 +607,9 @@ static int parsecue(const char *isofile) {
 			file_len = ftell(ti[numtracks + 1].handle) / 2352;
 
 			if (numtracks == 0 && strlen(isofile) >= 4 &&
-				strcmp(isofile + strlen(isofile) - 4, ".cue") == 0)
-			{
-				// user selected .cue as image file, use it's data track instead
+				(strcmp(isofile + strlen(isofile) - 4, ".cue") == 0 ||
+				strncasecmp(isofile + strlen(isofile) - 4, ".cd", 3) == 0)) {
+				// user selected .cue/.cdX as image file, use it's data track instead
 				fclose(cdHandle);
 				cdHandle = fopen(filepath, "rb");
 			}
@@ -614,6 +617,10 @@ static int parsecue(const char *isofile) {
 	}
 
 	fclose(fi);
+
+	// if there are no tracks detected, then it's not a cue file
+	if (!numtracks)
+		return -1;
 
 	return 0;
 }
@@ -1260,14 +1267,19 @@ static void *readThreadMain(void *param) {
       last_read_sector = requested_sector_end;
     }
 
+    index = ra_sector % SECTOR_BUFFER_SIZE;
+
     // check for end of CD
     if (ra_count && ra_sector >= max_sector) {
       ra_count = 0;
+      pthread_mutex_lock(&sectorbuffer_lock);
+      sectorbuffer[index].ret = -1;
+      sectorbuffer[index].sector = ra_sector;
+      pthread_cond_signal(&sectorbuffer_cond);
+      pthread_mutex_unlock(&sectorbuffer_lock);
     }
 
     if (ra_count) {
-
-      index = ra_sector % SECTOR_BUFFER_SIZE;
       pthread_mutex_lock(&sectorbuffer_lock);
       if (sectorbuffer[index].sector != ra_sector) {
         pthread_mutex_unlock(&sectorbuffer_lock);

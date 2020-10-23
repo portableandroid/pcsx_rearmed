@@ -423,7 +423,7 @@ void LoadMcd(int mcd, char *str) {
 	}
 
 	McdDisable[mcd - 1] = 0;
-#ifdef HAVE_LIBRETRO
+#if defined(HAVE_LIBRETRO) && !defined(PORTANDROID)
 	// memcard1 is handled by libretro
 	if (mcd == 1)
 		return;
