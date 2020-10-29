@@ -2655,9 +2655,8 @@ static int init_memcards(void)
 	int ret = 0;
 	const char *dir;
 	struct retro_variable var = { .key="pcsx_rearmed_memcard2", .value=NULL };
-	static const char CARD2_FILE[] = "pcsx-card2.mcd";
-
 #ifdef PORTANDROID
+	static const char CARD2_FILE[] = "pcsx_memory_card2.mcd";
 	// Set card 1
 	if (environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &dir) && dir)
 	{
@@ -2668,7 +2667,7 @@ static int init_memcards(void)
 		else
 		{
 			McdDisable[0] = 0;
-			snprintf(Config.Mcd1, sizeof(Config.Mcd1), "%s/%s", dir, "card1.mcd");
+			snprintf(Config.Mcd1, sizeof(Config.Mcd1), "%s/%s", dir, "pcsx_memory_card1.mcd");
 			SysPrintf("Use memcard 1: %s\n", Config.Mcd1);
 		}
 	}
@@ -2679,6 +2678,7 @@ static int init_memcards(void)
 		snprintf(Config.Mcd1, sizeof(Config.Mcd1), "none");
 	}
 #else
+	static const char CARD2_FILE[] = "pcsx-card2.mcd";
 	// Memcard2 will be handled and is re-enabled if needed using core
 	// operations.
 	// Memcard1 is handled by libretro, doing this will set core to
@@ -2707,7 +2707,10 @@ static int init_memcards(void)
 					McdDisable[1] = 0;
 					snprintf(Config.Mcd2, sizeof(Config.Mcd2), "%s/%s", dir, CARD2_FILE);
 					SysPrintf("Use memcard 2: %s\n", Config.Mcd2);
-				}
+                    #ifdef PORTANDROID
+                    init_memcard(Mcd2Data);
+                    #endif
+			}
          }
          else
          {
