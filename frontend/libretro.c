@@ -1457,7 +1457,7 @@ bool retro_load_game(const struct retro_game_info *info)
 	}
 
 	plugin_call_rearmed_cbs();
-	dfinput_activate();
+   /* dfinput_activate(); */
 
    if (CheckCdrom() == -1)
    {
@@ -1835,6 +1835,21 @@ static void update_variables(bool in_flight)
          Config.SpuIrq = 1;
    }
 
+#ifdef THREAD_RENDERING
+   var.key = "pcsx_rearmed_gpu_thread_rendering";
+   var.value = NULL;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (strcmp(var.value, "disabled") == 0)
+         pl_rearmed_cbs.thread_rendering = THREAD_RENDERING_OFF;
+      else if (strcmp(var.value, "sync") == 0)
+         pl_rearmed_cbs.thread_rendering = THREAD_RENDERING_SYNC;
+      else if (strcmp(var.value, "async") == 0)
+         pl_rearmed_cbs.thread_rendering = THREAD_RENDERING_ASYNC;
+   }
+#endif
+
 #ifdef GPU_PEOPS
    var.value = NULL;
    var.key = "pcsx_rearmed_gpu_peops_odd_even_bit";
@@ -2048,7 +2063,7 @@ static void update_variables(bool in_flight)
             "pcsx_rearmed_gpu_unai_fast_lighting",
             "pcsx_rearmed_gpu_unai_ilace_force",
             "pcsx_rearmed_gpu_unai_pixel_skip",
-            "pcsx_rearmed_gpu_unai_scale_hires"
+            "pcsx_rearmed_gpu_unai_scale_hires",
          };
 
          option_display.visible = show_advanced_gpu_unai_settings;
@@ -2200,7 +2215,7 @@ static void update_variables(bool in_flight)
          GPU_open(&gpuDisp, "PCSX", NULL);
       }
 
-      dfinput_activate();
+      /* dfinput_activate(); */
    }
    else
    {
@@ -2883,7 +2898,7 @@ void retro_init(void)
 	 * we have to do this because cache misses and some IO penalties
 	 * are not emulated. Warning: changing this may break compatibility. */
 	cycle_multiplier = 175;
-#ifdef HAVE_PRE_ARMV7
+#if defined(HAVE_PRE_ARMV7) && !defined(_3DS)
 	cycle_multiplier = 200;
 #endif
 	pl_rearmed_cbs.gpu_peops.iUseDither = 1;

@@ -633,7 +633,7 @@ struct retro_core_option_definition option_defs_us[] = {
    {
       "pcsx_rearmed_psxclock",
       "PSX CPU Clock",
-#ifdef HAVE_PRE_ARMV7
+#if defined(HAVE_PRE_ARMV7) && !defined(_3DS)
       "Overclock or underclock the PSX clock. Default is 50",
 #else
       "Overclock or underclock the PSX clock. Default is 57",
@@ -712,7 +712,7 @@ struct retro_core_option_definition option_defs_us[] = {
          { "100", NULL },
          { NULL, NULL },
       },
-#ifdef HAVE_PRE_ARMV7
+#if defined(HAVE_PRE_ARMV7) && !defined(_3DS)
       "50",
 #else
       "57",
@@ -973,6 +973,20 @@ struct retro_core_option_definition option_defs_us[] = {
       "disabled",
    },
 #endif /* GPU UNAI Advanced Settings */
+#ifdef THREAD_RENDERING
+   {
+      "pcsx_rearmed_gpu_thread_rendering",
+      "Threaded Rendering",
+      "When enabled, runs GPU commands in a thread. Sync waits for drawing to finish before vsync. Async will not wait unless there's another frame behind it.",
+      {
+         { "disabled", NULL },
+         { "sync",  NULL },
+         { "async",  NULL },
+         { NULL, NULL},
+      },
+      "disabled",
+   },
+#endif
 
    {
       "pcsx_rearmed_show_bios_bootlogo",
