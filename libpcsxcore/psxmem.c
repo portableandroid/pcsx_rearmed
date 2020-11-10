@@ -69,8 +69,18 @@ retry:
 
 		req = (void *)addr;
 		ret = mmap(req, size, PROT_READ | PROT_WRITE, flags, -1, 0);
+#ifdef PORTANDROID
+	    if (ret == MAP_FAILED) {
+	        // Something is wrong, just try to get it working
+            flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED;
+	        ret = mmap(req, size, PROT_READ | PROT_WRITE, flags, -1, 0);
+            if (ret == MAP_FAILED)
+                return NULL;
+	    }
+#else
 		if (ret == MAP_FAILED)
 			return NULL;
+#endif
 	}
 
 	if (addr != 0 && ret != (void *)addr) {
