@@ -3,6 +3,7 @@
 DEBUG ?= 0
 WANT_ZLIB ?= 1
 HAVE_CHD ?= 1
+USE_LIBRETRO_VFS ?= 0
 
 # Dynarec options: lightrec, ari64
 DYNAREC ?= lightrec
@@ -59,6 +60,25 @@ ifneq ($(findstring __thumb__,$(shell $(CC) -E -dD $(CFLAGS) include/arm_feature
 endif
 endif
 
+# ODROIDN2
+else ifneq (,$(findstring CortexA73_G12B,$(platform)))
+	TARGET := $(TARGET_NAME)_libretro.so
+	fpic := -fPIC
+	SHARED := -shared -Wl,-version-script=link.T
+	ARCH = arm64
+	CFLAGS += -fomit-frame-pointer -ffast-math -DARM
+	CPUFLAGS += -march=armv8-a+crc -mfpu=neon-fp-armv8 -mcpu=cortex-a73 -mtune=cortex-a73.cortex-a53
+
+# ALLWINNER H5
+else ifneq (,$(findstring h5,$(platform)))
+	TARGET := $(TARGET_NAME)_libretro.so
+	fpic := -fPIC
+	SHARED := -shared -Wl,-version-script=link.T
+	ARCH = arm64
+	DYNAREC ?= lightrec
+	CFLAGS += -fomit-frame-pointer -ffast-math -DARM
+	CPUFLAGS += -march=armv8-a+crc -mfpu=neon-fp-armv8 -mcpu=cortex-a53 -mtune=cortex-a53
+
 else ifeq ($(platform), linux-portable)
 	TARGET := $(TARGET_NAME)_libretro.so
 	fpic := -fPIC -nostdlib
@@ -71,33 +91,36 @@ else ifeq ($(platform), linux-portable)
 
 # OS X
 else ifeq ($(platform), osx)
-	DYNAREC ?= lightrec
+	DYNAREC := 0
 	TARGET := $(TARGET_NAME)_libretro.dylib
 	fpic := -fPIC
-	fpic += -mmacosx-version-min=10.1
+	HAVE_NEON = 0
+   MACSOSVER = `sw_vers -productVersion | cut -d. -f 1`
+   OSXVER = `sw_vers -productVersion | cut -d. -f 2`
+   OSX_LT_MAVERICKS = `(( $(OSXVER) <= 9)) && echo "YES"`
+   ifeq ($(OSX_LT_MAVERICKS),YES)
+   	   fpic += -mmacosx-version-min=10.1
+   endif
+
+   ifeq ($(CROSS_COMPILE),1)
+		TARGET_RULE   = -target $(LIBRETRO_APPLE_PLATFORM) -isysroot $(LIBRETRO_APPLE_ISYSROOT)
+		CFLAGS   += $(TARGET_RULE)
+		CPPFLAGS += $(TARGET_RULE)
+		CXXFLAGS += $(TARGET_RULE)
+		LDFLAGS  += $(TARGET_RULE)
+   endif
+
+	CFLAGS  += $(ARCHFLAGS)
+	CXXFLAGS  += $(ARCHFLAGS)
+	LDFLAGS += $(ARCHFLAGS)
 
 # iOS
-else ifeq ($(platform),$(filter $(platform),ios-arm64))
-	ARCH := arm64
-	HAVE_NEON = 0
-	BUILTIN_GPU = peops
-	DYNAREC = 0
-	TARGET := $(TARGET_NAME)_interpreter_libretro_ios.dylib
-
-	CC = clang -arch arm64 -isysroot $(IOSSDK) -miphoneos-version-min=8.0
-	CXX = clang++ -arch arm64 -isysroot $(IOSSDK) -miphoneos-version-min=8.0
-	CFLAGS += -marm -DIOS
-
 else ifneq (,$(findstring ios,$(platform)))
-	ARCH := arm
-#	DYNAREC ?= ari64
-	HAVE_NEON = 1
-	BUILTIN_GPU = neon
 	TARGET := $(TARGET_NAME)_libretro_ios.dylib
+	MINVERSION :=
 ifeq ($(DYNAREC),lightrec)
 	# Override
-	DYNAREC = 0
-	TARGET := $(TARGET_NAME)_interpreter_libretro_ios.dylib
+	DYNAREC := 0
 endif
 	fpic := -fPIC
 
@@ -105,23 +128,52 @@ endif
 		IOSSDK := $(shell xcodebuild -version -sdk iphoneos Path)
 	endif
 
-	CC = clang -arch armv7 -isysroot $(IOSSDK)
-	CXX = clang++ -arch armv7 -isysroot $(IOSSDK)
-	CC_AS = perl ./tools/gas-preprocessor.pl $(CC)
-	CFLAGS += -mcpu=cortex-a8 -mtune=cortex-a8 -mfpu=neon -marm
-	ASFLAGS += -mcpu=cortex-a8 -mtune=cortex-a8 -mfpu=neon
-	CFLAGS += -DIOS
-ifeq ($(platform),ios9)
-	CC     += -miphoneos-version-min=8.0
-	CXX    += -miphoneos-version-min=8.0
-	CC_AS  += -miphoneos-version-min=8.0
-	CFLAGS += -miphoneos-version-min=8.0
+	CFLAGS += -DIOS -marm
+ifeq ($(platform),ios-arm64)
+        CC = cc -arch arm64 -isysroot $(IOSSDK)
+	CXX = c++ -arch arm64 -isysroot $(IOSSDK)
+	ARCH := arm64
+	HAVE_NEON = 0
+	BUILTIN_GPU = peops
+	DYNAREC = 0
 else
-	CC     += -miphoneos-version-min=5.0
-	CXX    += -miphoneos-version-min=5.0
-	CC_AS  += -miphoneos-version-min=5.0
-	CFLAGS += -miphoneos-version-min=5.0
+	CC = cc -arch armv7 -isysroot $(IOSSDK)
+	CXX = c++ -arch armv7 -isysroot $(IOSSDK)
+	ARCH := arm
+	HAVE_NEON = 1
+	BUILTIN_GPU = neon
+	CFLAGS += -mcpu=cortex-a8 -mtune=cortex-a8 -mfpu=neon
+	ASFLAGS += -mcpu=cortex-a8 -mtune=cortex-a8 -mfpu=neon
 endif
+	CC_AS = perl ./tools/gas-preprocessor.pl $(CC)
+ifeq ($(platform),$(filter $(platform),ios9 ios-arm64))
+	MINVERSION = -miphoneos-version-min=8.0
+else
+	MINVERSION = -miphoneos-version-min=5.0
+endif
+	CFLAGS += $(MINVERSION)
+
+else ifeq ($(platform), tvos-arm64)
+	TARGET := $(TARGET_NAME)_libretro_tvos.dylib
+	MINVERSION :=
+ifeq ($(DYNAREC),lightrec)
+	# Override
+	DYNAREC := 0
+endif
+	fpic := -fPIC
+
+	ifeq ($(IOSSDK),)
+		IOSSDK := $(shell xcodebuild -version -sdk appletvos Path)
+	endif
+
+	CFLAGS += -DIOS -DTVOS -marm
+        CC = cc -arch arm64 -isysroot $(IOSSDK)
+	CXX = c++ -arch arm64 -isysroot $(IOSSDK)
+	ARCH := arm64
+	HAVE_NEON = 0
+	BUILTIN_GPU = peops
+	DYNAREC = 0
+	CC_AS = perl ./tools/gas-preprocessor.pl $(CC)
 
 # Nintendo Switch (libnx)
 else ifeq ($(platform), libnx)
@@ -139,6 +191,8 @@ else ifeq ($(platform), libnx)
    CFLAGS += -Ifrontend/switch -ftree-vectorize
    LIBPTHREAD :=
    STATIC_LINKING=1
+   # Lightning requires rw/rx patches first
+   DYNAREC := 0
 
 # Lakka Switch (arm64)
 else ifeq ($(platform), arm64)
@@ -148,20 +202,6 @@ else ifeq ($(platform), arm64)
    fpic := -fPIC
    CFLAGS := $(filter-out -O2, $(CFLAGS))
    CFLAGS += -O3 -ftree-vectorize
-
-# PS3
-else ifeq ($(platform), ps3)
-	TARGET := $(TARGET_NAME)_libretro_ps3.a
-	CC = $(CELL_SDK)/host-win32/ppu/bin/ppu-lv2-gcc.exe
-	AR = $(CELL_SDK)/host-win32/ppu/bin/ppu-lv2-ar.exe
-	CFLAGS += -DBLARGG_BIG_ENDIAN=1 -D__ppc__
-
-# sncps3
-else ifeq ($(platform), sncps3)
-	TARGET := $(TARGET_NAME)_libretro_ps3.a
-	CC = $(CELL_SDK)/host-win32/sn/bin/ps3ppusnc.exe
-	AR = $(CELL_SDK)/host-win32/sn/bin/ps3snarl.exe
-	CFLAGS += -DBLARGG_BIG_ENDIAN=1 -D__ppc__
 
 # Lightweight PS3 Homebrew SDK
 else ifeq ($(platform), psl1ght)
@@ -213,6 +253,7 @@ else ifeq ($(platform), ctr)
 	CFLAGS += -fomit-frame-pointer -ffast-math -funroll-loops
 	CFLAGS += -Ifrontend/3ds -I$(CTRULIB)/include
 	CFLAGS += -Werror=implicit-function-declaration
+	CFLAGS += -DHAVE_UNISTD_H
 
 	OBJS += frontend/3ds/utils.o
 
@@ -286,7 +327,7 @@ else ifeq ($(platform), rpi3)
 	BUILTIN_GPU = neon
 	DYNAREC = ari64
 
-#Raspberry Pi 4
+#Raspberry Pi 4 with a 32bit GNU/Linux OS
 else ifeq ($(platform), rpi4)
 	TARGET := $(TARGET_NAME)_libretro.so
 	fpic := -fPIC
@@ -296,6 +337,15 @@ else ifeq ($(platform), rpi4)
 	ARCH = arm
 	BUILTIN_GPU = neon
 	DYNAREC = ari64
+
+#Raspberry Pi 4 with a 64bit GNU/Linux OS
+else ifeq ($(platform), rpi4_64)
+        TARGET := $(TARGET_NAME)_libretro.so
+        ARCH := arm64
+        BUILTIN_GPU = unai
+        DYNAREC = lightrec
+        fpic := -fPIC
+        CFLAGS += -march=armv8-a+crc+simd -mtune=cortex-a72 -ftree-vectorize
 
 # Classic Platforms ####################
 # Platform affix = classic_<ISA>_<µARCH>
@@ -402,6 +452,7 @@ else
 	LIBPTHREAD :=
 	LIBDL :=
 	LIBM :=
+	USE_LIBRETRO_VFS = 1
 endif
 
 CFLAGS += $(fpic)

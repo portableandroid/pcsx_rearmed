@@ -43,6 +43,13 @@
 #include <unistd.h>
 #endif
 
+#ifdef USE_LIBRETRO_VFS
+#include <streams/file_stream_transforms.h>
+#undef fseeko
+#undef ftello
+#define ftello rftell
+#define fseeko rfseek
+#endif
 #define OFF_T_MSB ((off_t)1 << (sizeof(off_t) * 8 - 1))
 
 unsigned int cdrIsoMultidiskCount;
@@ -1057,7 +1064,10 @@ static int handlechd(const char *isofile) {
 		goto fail_io;
 
 	if(chd_open(isofile, CHD_OPEN_READ, NULL, &chd_img->chd) != CHDERR_NONE)
-      goto fail_io;
+		goto fail_io;
+
+	if (Config.CHD_Precache && (chd_precache(chd_img->chd) != CHDERR_NONE))
+		goto fail_io;
 
    chd_img->header = chd_get_header(chd_img->chd);
 

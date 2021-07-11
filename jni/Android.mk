@@ -5,6 +5,7 @@ $(shell cd "$(LOCAL_PATH)" && (diff -q ../frontend/revision.h_ ../frontend/revis
 $(shell cd "$(LOCAL_PATH)" && (rm ../frontend/revision.h_))
 
 HAVE_CHD ?= 1
+USE_LIBRETRO_VFS ?= 0
 
 ROOT_DIR     := $(LOCAL_PATH)/..
 CORE_DIR     := $(ROOT_DIR)/libpcsxcore
@@ -24,9 +25,7 @@ EXTRA_INCLUDES :=
 SOURCES_C := $(CORE_DIR)/cdriso.c \
              $(CORE_DIR)/cdrom.c \
              $(CORE_DIR)/cheat.c \
-             $(CORE_DIR)/debug.c \
              $(CORE_DIR)/decode_xa.c \
-             $(CORE_DIR)/disr3000a.c \
              $(CORE_DIR)/mdec.c \
              $(CORE_DIR)/misc.c \
              $(CORE_DIR)/plugins.c \
@@ -41,7 +40,6 @@ SOURCES_C := $(CORE_DIR)/cdriso.c \
              $(CORE_DIR)/psxmem.c \
              $(CORE_DIR)/r3000a.c \
              $(CORE_DIR)/sio.c \
-             $(CORE_DIR)/socket.c \
              $(CORE_DIR)/spu.c \
              $(CORE_DIR)/gte.c \
              $(CORE_DIR)/gte_nf.c \
@@ -75,51 +73,40 @@ SOURCES_C += $(FRONTEND_DIR)/main.c \
 
 # libchdr
 SOURCES_C += \
-             $(DEPS_DIR)/crypto/md5.c \
-             $(DEPS_DIR)/crypto/sha1.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/bitmath.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/bitreader.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/cpu.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/crc.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/fixed.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/fixed_intrin_sse2.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/fixed_intrin_ssse3.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/float.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/format.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/lpc.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/lpc_intrin_avx2.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/lpc_intrin_sse2.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/lpc_intrin_sse41.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/lpc_intrin_sse.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/md5.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/memory.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/metadata_iterators.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/metadata_object.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/stream_decoder.c \
-             $(DEPS_DIR)/flac-1.3.2/src/libFLAC/window.c \
-             $(DEPS_DIR)/lzma-16.04/C/Alloc.c \
-             $(DEPS_DIR)/lzma-16.04/C/Bra86.c \
-             $(DEPS_DIR)/lzma-16.04/C/Bra.c \
-             $(DEPS_DIR)/lzma-16.04/C/BraIA64.c \
-             $(DEPS_DIR)/lzma-16.04/C/CpuArch.c \
-             $(DEPS_DIR)/lzma-16.04/C/Delta.c \
-             $(DEPS_DIR)/lzma-16.04/C/LzFind.c \
-             $(DEPS_DIR)/lzma-16.04/C/Lzma86Dec.c \
-             $(DEPS_DIR)/lzma-16.04/C/Lzma86Enc.c \
-             $(DEPS_DIR)/lzma-16.04/C/LzmaDec.c \
-             $(DEPS_DIR)/lzma-16.04/C/LzmaEnc.c \
-             $(DEPS_DIR)/lzma-16.04/C/LzmaLib.c \
-             $(DEPS_DIR)/lzma-16.04/C/Sort.c \
-             $(DEPS_DIR)/libchdr/bitstream.c \
-             $(DEPS_DIR)/libchdr/cdrom.c \
-             $(DEPS_DIR)/libchdr/chd.c \
-             $(DEPS_DIR)/libchdr/flac.c \
-             $(DEPS_DIR)/libchdr/huffman.c
+             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/Alloc.c \
+             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/Bra86.c \
+             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/BraIA64.c \
+             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/CpuArch.c \
+             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/Delta.c \
+             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/LzFind.c \
+             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/Lzma86Dec.c \
+             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/LzmaDec.c \
+             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/LzmaEnc.c \
+             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/Sort.c \
+             $(DEPS_DIR)/libchdr/src/libchdr_bitstream.c \
+             $(DEPS_DIR)/libchdr/src/libchdr_cdrom.c \
+             $(DEPS_DIR)/libchdr/src/libchdr_chd.c \
+             $(DEPS_DIR)/libchdr/src/libchdr_flac.c \
+             $(DEPS_DIR)/libchdr/src/libchdr_huffman.c
 SOURCES_ASM :=
 
 COREFLAGS := -ffast-math -funroll-loops -DHAVE_LIBRETRO -DNO_FRONTEND -DFRONTEND_SUPPORTS_RGB565 -DANDROID -DREARMED
-COREFLAGS += -DPACKAGE_VERSION=\"1.3.2\" -DFLAC__HAS_OGG=0 -DFLAC__NO_DLL -DHAVE_LROUND -DHAVE_STDINT_H -DHAVE_STDLIB_H -DFLAC__NO_DLL -D_7ZIP_ST -DHAVE_SYS_PARAM_H
-COREFLAGS += -DHAVE_CHD
+COREFLAGS += -DHAVE_CHD -D_7ZIP_ST
+
+ifeq ($(USE_LIBRETRO_VFS),1)
+SOURCES_C += \
+             $(LIBRETRO_COMMON)/compat/compat_posix_string.c \
+             $(LIBRETRO_COMMON)/compat/fopen_utf8.c \
+             $(LIBRETRO_COMMON)/encodings/compat_strl.c \
+             $(LIBRETRO_COMMON)/encodings/encoding_utf.c \
+             $(LIBRETRO_COMMON)/file/file_path.c \
+             $(LIBRETRO_COMMON)/streams/file_stream.c \
+             $(LIBRETRO_COMMON)/streams/file_stream_transforms.c \
+             $(LIBRETRO_COMMON)/string/stdstring.c \
+             $(LIBRETRO_COMMON)/time/rtime.c \
+             $(LIBRETRO_COMMON)/vfs/vfs_implementation.c
+COREFLAGS += -DUSE_LIBRETRO_VFS
+endif
 
 HAVE_ARI64=0
 HAVE_LIGHTREC=0
@@ -180,13 +167,11 @@ ifeq ($(TARGET_ARCH_ABI),armeabi-v7a)
   SOURCES_C   += $(DYNAREC_DIR)/backends/psx/emu_if.c
 else ifeq ($(TARGET_ARCH_ABI),armeabi)
   COREFLAGS += -DUSE_GPULIB=1 -DGPU_UNAI
-  COREFLAGS += -DINLINE="static __inline__" -Dasm="__asm__ __volatile__"
   SOURCES_ASM += $(UNAI_DIR)/gpu_arm.S \
                  $(FRONTEND_DIR)/cspace_arm.S
   SOURCES_C += $(UNAI_DIR)/gpulib_if.cpp
 else
   COREFLAGS += -DUSE_GPULIB=1 -DGPU_UNAI
-  COREFLAGS += -DINLINE="static __inline__" -Dasm="__asm__ __volatile__"
   SOURCES_C += $(UNAI_DIR)/gpulib_if.cpp
 endif
 
@@ -200,7 +185,7 @@ LOCAL_MODULE        := retro
 LOCAL_SRC_FILES     := $(SOURCES_C) $(SOURCES_ASM)
 LOCAL_CFLAGS        := $(COREFLAGS)
 LOCAL_C_INCLUDES    := $(ROOT_DIR)/include
-LOCAL_C_INCLUDES    += $(DEPS_DIR)/crypto $(DEPS_DIR)/flac-1.3.2/include $(DEPS_DIR)/flac-1.3.2/src/libFLAC/include $(DEPS_DIR)/lzma-16.04/C $(DEPS_DIR)/libchdr
+LOCAL_C_INCLUDES    += $(DEPS_DIR)/crypto $(DEPS_DIR)/libchdr/deps/lzma-19.00/include $(DEPS_DIR)/libchdr/include $(DEPS_DIR)/libchdr/include/libchdr
 LOCAL_C_INCLUDES    += $(LIBRETRO_COMMON)/include
 LOCAL_C_INCLUDES    += $(EXTRA_INCLUDES)
 LOCAL_LDFLAGS       := -Wl,-version-script=$(FRONTEND_DIR)/link.T
@@ -209,9 +194,6 @@ LOCAL_ARM_MODE      := arm
 
 ifeq ($(TARGET_ARCH_ABI),armeabi-v7a)
   LOCAL_ARM_NEON  := true
-endif
-ifeq ($(TARGET_ARCH),arm)
-  LOCAL_LDLIBS    += -Wl,-no-warn-shared-textrel
 endif
 
 include $(BUILD_SHARED_LIBRARY)

@@ -45,29 +45,35 @@ CFLAGS += -DPCNT
 endif
 
 # core
-OBJS += libpcsxcore/cdriso.o libpcsxcore/cdrom.o libpcsxcore/cheat.o libpcsxcore/debug.o \
-	libpcsxcore/decode_xa.o libpcsxcore/disr3000a.o libpcsxcore/mdec.o \
+OBJS += libpcsxcore/cdriso.o libpcsxcore/cdrom.o libpcsxcore/cheat.o \
+	libpcsxcore/decode_xa.o libpcsxcore/mdec.o \
 	libpcsxcore/misc.o libpcsxcore/plugins.o libpcsxcore/ppf.o libpcsxcore/psxbios.o \
 	libpcsxcore/psxcommon.o libpcsxcore/psxcounters.o libpcsxcore/psxdma.o libpcsxcore/psxhle.o \
 	libpcsxcore/psxhw.o libpcsxcore/psxinterpreter.o libpcsxcore/psxmem.o libpcsxcore/r3000a.o \
-	libpcsxcore/sio.o libpcsxcore/socket.o libpcsxcore/spu.o
+	libpcsxcore/sio.o libpcsxcore/spu.o
 OBJS += libpcsxcore/gte.o libpcsxcore/gte_nf.o libpcsxcore/gte_divider.o
+
+ifeq ($(DEBUG), 1)
+OBJS += libpcsxcore/debug.o	libpcsxcore/socket.o libpcsxcore/disr3000a.o
+endif
+
 ifeq ($(WANT_ZLIB),1)
-CFLAGS += -Ideps/zlib
-OBJS += deps/zlib/adler32.o \
-        deps/zlib/compress.o \
-        deps/zlib/crc32.o \
-        deps/zlib/deflate.o \
-        deps/zlib/gzclose.o \
-        deps/zlib/gzlib.o \
-        deps/zlib/gzread.o \
-        deps/zlib/gzwrite.o \
-        deps/zlib/inffast.o \
-        deps/zlib/inflate.o \
-        deps/zlib/inftrees.o \
-        deps/zlib/trees.o \
-        deps/zlib/uncompr.o \
-        deps/zlib/zutil.o
+CFLAGS += -Ideps/libchdr/deps/zlib-1.2.11
+OBJS += deps/libchdr/deps/zlib-1.2.11/adler32.o \
+        deps/libchdr/deps/zlib-1.2.11/compress.o \
+        deps/libchdr/deps/zlib-1.2.11/crc32.o \
+        deps/libchdr/deps/zlib-1.2.11/deflate.o \
+        deps/libchdr/deps/zlib-1.2.11/gzclose.o \
+        deps/libchdr/deps/zlib-1.2.11/gzlib.o \
+        deps/libchdr/deps/zlib-1.2.11/gzread.o \
+        deps/libchdr/deps/zlib-1.2.11/gzwrite.o \
+        deps/libchdr/deps/zlib-1.2.11/infback.o \
+        deps/libchdr/deps/zlib-1.2.11/inffast.o \
+        deps/libchdr/deps/zlib-1.2.11/inflate.o \
+        deps/libchdr/deps/zlib-1.2.11/inftrees.o \
+        deps/libchdr/deps/zlib-1.2.11/trees.o \
+        deps/libchdr/deps/zlib-1.2.11/uncompr.o \
+        deps/libchdr/deps/zlib-1.2.11/zutil.o
 endif
 ifeq "$(ARCH)" "arm"
 OBJS += libpcsxcore/gte_arm.o
@@ -180,6 +186,10 @@ CFLAGS += -DGPU_PEOPS
 plugins/dfxvideo/gpulib_if.o: CFLAGS += -fno-strict-aliasing
 plugins/dfxvideo/gpulib_if.o: plugins/dfxvideo/prim.c plugins/dfxvideo/soft.c
 OBJS += plugins/dfxvideo/gpulib_if.o
+ifeq "$(THREAD_RENDERING)" "1"
+CFLAGS += -DTHREAD_RENDERING
+OBJS += plugins/gpulib/gpulib_thread_if.o
+endif
 endif
 ifeq "$(BUILTIN_GPU)" "unai"
 CFLAGS += -DGPU_UNAI
@@ -190,12 +200,12 @@ OBJS += plugins/gpu_unai/gpulib_if.o
 ifeq "$(ARCH)" "arm"
 OBJS += plugins/gpu_unai/gpu_arm.o
 endif
-plugins/gpu_unai/gpulib_if.o: CFLAGS += -DREARMED -O3 
-CC_LINK = $(CXX)
-endif
 ifeq "$(THREAD_RENDERING)" "1"
 CFLAGS += -DTHREAD_RENDERING
 OBJS += plugins/gpulib/gpulib_thread_if.o
+endif
+plugins/gpu_unai/gpulib_if.o: CFLAGS += -DREARMED -O3 
+CC_LINK = $(CXX)
 endif
 
 # cdrcimg
@@ -203,57 +213,25 @@ OBJS += plugins/cdrcimg/cdrcimg.o
 
 # libchdr
 ifeq "$(HAVE_CHD)" "1"
-CFLAGS += -Ideps/libchdr
-OBJS += deps/crypto/md5.o
-OBJS += deps/crypto/sha1.o
-OBJS += deps/flac-1.3.2/src/libFLAC/bitmath.o
-OBJS += deps/flac-1.3.2/src/libFLAC/bitreader.o
-OBJS += deps/flac-1.3.2/src/libFLAC/cpu.o
-OBJS += deps/flac-1.3.2/src/libFLAC/crc.o
-OBJS += deps/flac-1.3.2/src/libFLAC/fixed.o
-OBJS += deps/flac-1.3.2/src/libFLAC/fixed_intrin_sse2.o
-OBJS += deps/flac-1.3.2/src/libFLAC/fixed_intrin_ssse3.o
-OBJS += deps/flac-1.3.2/src/libFLAC/float.o
-OBJS += deps/flac-1.3.2/src/libFLAC/format.o
-OBJS += deps/flac-1.3.2/src/libFLAC/lpc.o
-OBJS += deps/flac-1.3.2/src/libFLAC/lpc_intrin_avx2.o
-OBJS += deps/flac-1.3.2/src/libFLAC/lpc_intrin_sse2.o
-OBJS += deps/flac-1.3.2/src/libFLAC/lpc_intrin_sse41.o
-OBJS += deps/flac-1.3.2/src/libFLAC/lpc_intrin_sse.o
-OBJS += deps/flac-1.3.2/src/libFLAC/md5.o
-OBJS += deps/flac-1.3.2/src/libFLAC/memory.o
-OBJS += deps/flac-1.3.2/src/libFLAC/metadata_iterators.o
-OBJS += deps/flac-1.3.2/src/libFLAC/metadata_object.o
-OBJS += deps/flac-1.3.2/src/libFLAC/stream_decoder.o
-OBJS += deps/flac-1.3.2/src/libFLAC/window.o
-OBJS += deps/lzma-16.04/C/Alloc.o
-OBJS += deps/lzma-16.04/C/Bra86.o
-OBJS += deps/lzma-16.04/C/Bra.o
-OBJS += deps/lzma-16.04/C/BraIA64.o
-OBJS += deps/lzma-16.04/C/CpuArch.o
-OBJS += deps/lzma-16.04/C/Delta.o
-OBJS += deps/lzma-16.04/C/LzFind.o
-OBJS += deps/lzma-16.04/C/Lzma86Dec.o
-OBJS += deps/lzma-16.04/C/Lzma86Enc.o
-OBJS += deps/lzma-16.04/C/LzmaDec.o
-OBJS += deps/lzma-16.04/C/LzmaEnc.o
-OBJS += deps/lzma-16.04/C/LzmaLib.o
-OBJS += deps/lzma-16.04/C/Sort.o
-OBJS += deps/libchdr/bitstream.o
-OBJS += deps/libchdr/cdrom.o
-OBJS += deps/libchdr/chd.o
-OBJS += deps/libchdr/flac.o
-OBJS += deps/libchdr/huffman.o
-
-ifneq (,$(findstring win,$(platform)))
-  CFLAGS += -DHAVE_FSEEKO
-  OBJS += deps/flac-1.3.2/src/libFLAC/windows_unicode_filenames.o
-else
-  CFLAGS += -DHAVE_SYS_PARAM_H
-endif
-
-CFLAGS += -Ideps/crypto -Ideps/flac-1.3.2/include -Ideps/flac-1.3.2/src/libFLAC/include -Ideps/flac-1.3.2/src/libFLAC/include -Ideps/lzma-16.04/C
-CFLAGS += -DHAVE_CHD -D'PACKAGE_VERSION="1.3.2"' -DFLAC__HAS_OGG=0 -DFLAC__NO_DLL -DHAVE_LROUND -DHAVE_STDINT_H -DHAVE_STDLIB_H -DFLAC__NO_DLL -D_7ZIP_ST
+CFLAGS += -Ideps/libchdr/include
+CFLAGS += -Ideps/libchdr/include/libchdr
+OBJS += deps/libchdr/deps/lzma-19.00/src/Alloc.o
+OBJS += deps/libchdr/deps/lzma-19.00/src/Bra86.o
+OBJS += deps/libchdr/deps/lzma-19.00/src/BraIA64.o
+OBJS += deps/libchdr/deps/lzma-19.00/src/CpuArch.o
+OBJS += deps/libchdr/deps/lzma-19.00/src/Delta.o
+OBJS += deps/libchdr/deps/lzma-19.00/src/LzFind.o
+OBJS += deps/libchdr/deps/lzma-19.00/src/Lzma86Dec.o
+OBJS += deps/libchdr/deps/lzma-19.00/src/LzmaDec.o
+OBJS += deps/libchdr/deps/lzma-19.00/src/LzmaEnc.o
+OBJS += deps/libchdr/deps/lzma-19.00/src/Sort.o
+OBJS += deps/libchdr/src/libchdr_bitstream.o
+OBJS += deps/libchdr/src/libchdr_cdrom.o
+OBJS += deps/libchdr/src/libchdr_chd.o
+OBJS += deps/libchdr/src/libchdr_flac.o
+OBJS += deps/libchdr/src/libchdr_huffman.o
+CFLAGS += -Ideps/libchdr/deps/lzma-19.00/include
+CFLAGS += -DHAVE_CHD -D_7ZIP_ST
 LDFLAGS += -lm
 endif
 
@@ -318,6 +296,19 @@ CFLAGS += `pkg-config --cflags glib-2.0 libosso dbus-1 hildon-fm-2`
 LDFLAGS += `pkg-config --libs glib-2.0 libosso dbus-1 hildon-fm-2`
 endif
 ifeq "$(PLATFORM)" "libretro"
+ifeq "$(USE_LIBRETRO_VFS)" "1"
+OBJS += libretro-common/compat/compat_posix_string.o
+OBJS += libretro-common/compat/fopen_utf8.o
+OBJS += libretro-common/encodings/compat_strl.o
+OBJS += libretro-common/encodings/encoding_utf.o
+OBJS += libretro-common/file/file_path.o
+OBJS += libretro-common/streams/file_stream.o
+OBJS += libretro-common/streams/file_stream_transforms.o
+OBJS += libretro-common/string/stdstring.o
+OBJS += libretro-common/time/rtime.o
+OBJS += libretro-common/vfs/vfs_implementation.o
+CFLAGS += -DUSE_LIBRETRO_VFS
+endif
 OBJS += frontend/libretro.o
 CFLAGS += -Ilibretro-common/include
 CFLAGS += -DFRONTEND_SUPPORTS_RGB565

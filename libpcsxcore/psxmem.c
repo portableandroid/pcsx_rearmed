@@ -31,8 +31,16 @@
 
 #include "memmap.h"
 
+#ifdef USE_LIBRETRO_VFS
+#include <streams/file_stream_transforms.h>
+#endif
+
 #ifndef MAP_ANONYMOUS
 #define MAP_ANONYMOUS MAP_ANON
+#endif
+
+#ifdef NDEBUG
+void DebugCheckBP(u32 address, enum breakpoint_types type) {}
 #endif
 
 void *(*psxMapHook)(unsigned long addr, size_t size, int is_fixed,

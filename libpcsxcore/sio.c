@@ -24,6 +24,10 @@
 #include "sio.h"
 #include <sys/stat.h>
 
+#ifdef USE_LIBRETRO_VFS
+#include <streams/file_stream_transforms.h>
+#endif
+
 // Status Flags
 #define TX_RDY		0x0001
 #define RX_RDY		0x0002
@@ -464,7 +468,8 @@ void LoadMcd(int mcd, char *str) {
 			else if(buf.st_size == MCD_SIZE + 3904)
 				fseek(f, 3904, SEEK_SET);
 		}
-		fread(data, 1, MCD_SIZE, f);
+		int size = fread(data, 1, MCD_SIZE, f);
+		SysPrintf(_("Read memory card done, size = %d\n"), size);
 		fclose(f);
 	}
 }

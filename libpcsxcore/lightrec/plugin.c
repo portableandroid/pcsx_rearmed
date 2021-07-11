@@ -1,4 +1,6 @@
 #include <lightrec.h>
+#include <memmanager.h>
+
 #include <stdbool.h>
 #include <stdio.h>
 #include <unistd.h>
