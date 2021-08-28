@@ -3484,12 +3484,17 @@ void syscall_assemble(int i,struct regstat *i_regs)
 
 void hlecall_assemble(int i,struct regstat *i_regs)
 {
+  extern void psxNULL();
   signed char ccreg=get_reg(i_regs->regmap,CCREG);
   assert(ccreg==HOST_CCREG);
   assert(!is_delayslot);
   (void)ccreg;
   emit_movimm(start+i*4+4,0); // Get PC
-  emit_movimm((int)psxHLEt[source[i]&7],1);
+  uint32_t hleCode = source[i] & 0x03ffffff;
+  if (hleCode >= (sizeof(psxHLEt) / sizeof(psxHLEt[0])))
+    emit_movimm((int)psxNULL,1);
+  else
+    emit_movimm((int)psxHLEt[hleCode],1);
   emit_addimm(HOST_CCREG,CLOCK_ADJUST(ccadj[i]),HOST_CCREG); // XXX
   emit_jmp((int)jump_hlecall);
 }

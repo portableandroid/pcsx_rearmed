@@ -1354,14 +1354,12 @@ bool retro_load_game(const struct retro_game_info *info)
 
       for (i = 0; i < sizeof(disks) / sizeof(disks[0]) && i < cdrIsoMultidiskCount; i++)
       {
-         char disk_name[PATH_MAX];
-         char disk_label[PATH_MAX];
-         disk_name[0] = '\0';
-         disk_label[0] = '\0';
+         char disk_name[PATH_MAX - 16] = { 0 };
+         char disk_label[PATH_MAX] = { 0 };
 
          disks[i].fname = strdup(info->path);
 
-         get_disk_label(disk_name, info->path, PATH_MAX);
+         get_disk_label(disk_name, info->path, sizeof(disk_name));
          snprintf(disk_label, sizeof(disk_label), "%s #%u", disk_name, (unsigned)i + 1);
          disks[i].flabel = strdup(disk_label);
 
@@ -1656,7 +1654,9 @@ static void update_variables(bool in_flight)
    var.value = NULL;
    var.key = "pcsx_rearmed_drc";
 
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   if (!environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var))
+      var.value = "enabled";
+
    {
       R3000Acpu *prev_cpu = psxCpu;
 #if defined(LIGHTREC)
@@ -1720,17 +1720,6 @@ static void update_variables(bool in_flight)
          Config.RCntFix = 0;
       else if (strcmp(var.value, "enabled") == 0)
          Config.RCntFix = 1;
-   }
-
-   var.value = NULL;
-   var.key = "pcsx_rearmed_idiablofix";
-
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-   {
-      if (strcmp(var.value, "disabled") == 0)
-         spu_config.idiablofix = 0;
-      else if (strcmp(var.value, "enabled") == 0)
-         spu_config.idiablofix = 1;
    }
 
    var.value = NULL;
@@ -2833,7 +2822,8 @@ void retro_init(void)
 #ifdef _3DS
    vout_buf = linearMemAlign(VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2, 0x80);
 #elif defined(_POSIX_C_SOURCE) && (_POSIX_C_SOURCE >= 200112L) && !defined(VITA) && !defined(__SWITCH__)
-   posix_memalign(&vout_buf, 16, VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2);
+   if (posix_memalign(&vout_buf, 16, VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2) != 0)
+      vout_buf = (void *) 0;
 #else
    vout_buf = malloc(VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2);
 #endif
