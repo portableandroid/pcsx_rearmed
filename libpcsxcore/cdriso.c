@@ -1754,7 +1754,7 @@ static long CALLBACK ISOopen(void) {
 	if (ftello(cdHandle) % 2048 == 0) {
 		unsigned int modeTest = 0;
 		fseek(cdHandle, 0, SEEK_SET);
-		if (fread(&modeTest, sizeof(modeTest), 1, cdHandle) != sizeof(modeTest)) {
+		if (!fread(&modeTest, sizeof(modeTest), 1, cdHandle)) {
 #ifndef NDEBUG
 			SysPrintf(_("File IO error in <%s:%s>.\n"), __FILE__, __func__);
 #endif
@@ -1915,12 +1915,12 @@ static void DecodeRawSubData(void) {
 // read track
 // time: byte 0 - minute; byte 1 - second; byte 2 - frame
 // uses bcd format
-static long CALLBACK ISOreadTrack(unsigned char *time) {
+static boolean CALLBACK ISOreadTrack(unsigned char *time) {
 	int sector = MSF2SECT(btoi(time[0]), btoi(time[1]), btoi(time[2]));
 	long ret;
 
 	if (cdHandle == NULL) {
-		return -1;
+		return 0;
 	}
 
 	if (pregapOffset) {
@@ -1934,7 +1934,7 @@ static long CALLBACK ISOreadTrack(unsigned char *time) {
 
 	ret = cdimg_read_func(cdHandle, 0, cdbuffer, sector);
 	if (ret < 0)
-		return -1;
+		return 0;
 
 	if (subHandle != NULL) {
 		fseek(subHandle, sector * SUB_FRAMESIZE, SEEK_SET);
@@ -1945,7 +1945,7 @@ static long CALLBACK ISOreadTrack(unsigned char *time) {
 		if (subChanRaw) DecodeRawSubData();
 	}
 
-	return 0;
+	return 1;
 }
 
 // plays cdda audio
