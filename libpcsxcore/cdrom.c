@@ -46,6 +46,7 @@
 
 cdrStruct cdr;
 static unsigned char *pTransfer;
+static s16 read_buf[CD_FRAMESIZE_RAW/2];
 
 /* CD-ROM magic numbers */
 #define CdlSync        0 /* nocash documentation : "Uh, actually, returns error code 40h = Invalid Command...?" */
@@ -382,7 +383,7 @@ static void ReadTrack(const u8 *time) {
 
 	CDR_LOG("ReadTrack *** %02x:%02x:%02x\n", tmp[0], tmp[1], tmp[2]);
 
-	cdr.RErr = CDR_readTrack(tmp);
+	cdr.NoErr = CDR_readTrack(tmp);
 	memcpy(cdr.Prev, tmp, 3);
 
 	if (CheckSBI(time))
@@ -431,6 +432,10 @@ static void AddIrqQueue(unsigned short irq, unsigned long ecycle) {
 
 static void cdrPlayInterrupt_Autopause()
 {
+	u32 abs_lev_max = 0;
+	boolean abs_lev_chselect;
+	u32 i;
+
 	if ((cdr.Mode & MODE_AUTOPAUSE) && cdr.TrackChanged) {
 		CDR_LOG( "CDDA STOP\n" );
 
@@ -446,10 +451,20 @@ static void cdrPlayInterrupt_Autopause()
 		StopCdda();
 	}
 	else if (((cdr.Mode & MODE_REPORT) || cdr.FastForward || cdr.FastBackward)) {
-
+		CDR_readCDDA(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1], cdr.SetSectorPlay[2], (u8 *)read_buf);
 		cdr.Result[0] = cdr.StatP;
 		cdr.Result[1] = cdr.subq.Track;
 		cdr.Result[2] = cdr.subq.Index;
+		
+		abs_lev_chselect = cdr.subq.Absolute[1] & 0x01;
+		
+		/* 8 is a hack. For accuracy, it should be 588. */
+		for (i = 0; i < 8; i++)
+		{
+			abs_lev_max = MAX_VALUE(abs_lev_max, abs(read_buf[i * 2 + abs_lev_chselect]));
+		}
+		abs_lev_max = MIN_VALUE(abs_lev_max, 32767);
+		abs_lev_max |= abs_lev_chselect << 15;
 
 		if (cdr.subq.Absolute[2] & 0x10) {
 			cdr.Result[3] = cdr.subq.Relative[0];
@@ -462,8 +477,8 @@ static void cdrPlayInterrupt_Autopause()
 			cdr.Result[5] = cdr.subq.Absolute[2];
 		}
 
-		cdr.Result[6] = 0;
-		cdr.Result[7] = 0;
+		cdr.Result[6] = abs_lev_max >> 0;
+		cdr.Result[7] = abs_lev_max >> 8;
 
 		// Rayman: Logo freeze (resultready + dataready)
 		cdr.ResultReady = 1;
@@ -490,7 +505,6 @@ void cdrPlayInterrupt()
 		cdr.Seeked = SEEK_DONE;
 		if (cdr.Irq == 0) {
 			cdr.Stat = Complete;
-			cdr.RErr = 1;
 			setIrq();
 		}
 
@@ -518,6 +532,12 @@ void cdrPlayInterrupt()
 		cdrPlayInterrupt_Autopause();
 
 	if (!cdr.Play) return;
+	
+	if (CDR_readCDDA && !cdr.Muted && cdr.Mode & MODE_REPORT) {
+		cdrAttenuate(read_buf, CD_FRAMESIZE_RAW / 4, 1);
+		if (SPU_playCDDAchannel)
+			SPU_playCDDAchannel(read_buf, CD_FRAMESIZE_RAW);
+	}
 
 	cdr.SetSectorPlay[2]++;
 	if (cdr.SetSectorPlay[2] == 75) {
@@ -588,8 +608,10 @@ void cdrInterrupt() {
 		do_CdlPlay:
 		case CdlPlay:
 			StopCdda();
-			/* It would set it to SEEK_DONE*/
-			cdr.Seeked = SEEK_PENDING;
+			if (cdr.Seeked == SEEK_PENDING) {
+				// XXX: wrong, should seek instead..
+				cdr.Seeked = SEEK_DONE;
+			}
 
 			cdr.FastBackward = 0;
 			cdr.FastForward = 0;
@@ -638,7 +660,7 @@ void cdrInterrupt() {
 			cdr.TrackChanged = FALSE;
 
 			if (!Config.Cdda)
-				CDR_play(cdr.SetSectorPlay);
+				CDR_play();
 
 			// Vib Ribbon: gameplay checks flag
 			cdr.StatP &= ~STATUS_SEEK;
@@ -656,7 +678,6 @@ void cdrInterrupt() {
 		case CdlForward:
 			// TODO: error 80 if stopped
 			cdr.Stat = Complete;
-			cdr.RErr = 1;
 			// GameShark CD Player: Calls 2x + Play 2x
 			cdr.FastForward = 1;
 			cdr.FastBackward = 0;
@@ -681,7 +702,6 @@ void cdrInterrupt() {
 
 		case CdlStandby + 0x100:
 			cdr.Stat = Complete;
-			cdr.RErr = 1;
 			break;
 
 		case CdlStop:
@@ -709,7 +729,6 @@ void cdrInterrupt() {
 			cdr.StatP &= ~STATUS_ROTATING;
 			cdr.Result[0] = cdr.StatP;
 			cdr.Stat = Complete;
-			cdr.RErr = 1;
 			break;
 
 		case CdlPause:
@@ -745,7 +764,6 @@ void cdrInterrupt() {
 			cdr.StatP &= ~STATUS_READ;
 			cdr.Result[0] = cdr.StatP;
 			cdr.Stat = Complete;
-			cdr.RErr = 1;
 			break;
 
 		case CdlReset:
@@ -758,7 +776,6 @@ void cdrInterrupt() {
 
 		case CdlReset + 0x100:
 			cdr.Stat = Complete;
-			cdr.RErr = 1;
 			break;
 
 		case CdlMute:
@@ -808,7 +825,6 @@ void cdrInterrupt() {
 
 		case CdlReadT + 0x100:
 			cdr.Stat = Complete;
-			cdr.RErr = 1;
 			break;
 
 		case CdlGetTN:
@@ -908,7 +924,6 @@ void cdrInterrupt() {
 			/* This adds the string "PCSX" in Playstation bios boot screen */
 			memcpy((char *)&cdr.Result[4], "PCSX", 4);
 			cdr.Stat = Complete;
-			cdr.RErr = 1;
 			break;
 
 		case CdlInit:
@@ -932,7 +947,6 @@ void cdrInterrupt() {
 
 		case CdlReadToc + 0x100:
 			cdr.Stat = Complete;
-			cdr.RErr = 1;
 			no_busy_error = 1;
 			break;
 
@@ -1132,9 +1146,9 @@ void cdrReadInterrupt() {
 
 	buf = CDR_getBuffer();
 	if (buf == NULL)
-		cdr.RErr = 0;
+		cdr.NoErr = 0;
 
-	if (cdr.RErr == 0) {
+	if (cdr.NoErr == 0) {
 		CDR_LOG_I("cdrReadInterrupt() Log: err\n");
 		memset(cdr.Transfer, 0, DATA_SIZE);
 		cdr.Stat = DiskError;
@@ -1589,7 +1603,7 @@ int cdrFreeze(void *f, int Mode) {
 
 			Find_CurTrack(cdr.SetSectorPlay);
 			if (!Config.Cdda)
-				CDR_play(cdr.SetSectorPlay);
+				CDR_play();
 		}
 
 		if ((cdr.freeze_ver & 0xffffff00) != 0x63647200) {
