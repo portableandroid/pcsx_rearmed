@@ -604,7 +604,7 @@ struct retro_core_option_definition option_defs_us[] = {
 #endif
    },
 
-#if defined(LIGHTREC) || defined(NEW_DYNAREC)
+#ifndef DRC_DISABLE
    {
       "pcsx_rearmed_drc",
       "Dynamic Recompiler",
@@ -616,9 +616,9 @@ struct retro_core_option_definition option_defs_us[] = {
       },
       "enabled",
    },
-#endif /* LIGHTREC || NEW_DYNAREC */
+#endif
 
-#ifdef NEW_DYNAREC
+#if !defined(DRC_DISABLE) && !defined(LIGHTREC)
    {
       "pcsx_rearmed_psxclock",
       "PSX CPU Clock",
@@ -707,7 +707,7 @@ struct retro_core_option_definition option_defs_us[] = {
       "57",
 #endif
    },
-#endif /* NEW_DYNAREC */
+#endif /* !DRC_DISABLE && !LIGHTREC */
 
 #ifdef GPU_NEON
    {
@@ -1094,7 +1094,7 @@ struct retro_core_option_definition option_defs_us[] = {
       "disabled",
    },
 
-#ifdef NEW_DYNAREC
+#if !defined(DRC_DISABLE) && !defined(LIGHTREC)
    {
       "pcsx_rearmed_nosmccheck",
       "(Speed Hack) Disable SMC Checks",
@@ -1128,7 +1128,29 @@ struct retro_core_option_definition option_defs_us[] = {
       },
       "disabled",
    },
-#endif /* NEW_DYNAREC */
+   {
+      "pcsx_rearmed_nostalls",
+      "Disable CPU/GTE stalls",
+      "Will cause some games to run too fast.",
+      {
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL },
+      },
+      "disabled",
+   },
+   {
+      "pcsx_rearmed_nocompathacks",
+      "Disable compat hacks",
+      "Disables game-specific compatibility hacks.",
+      {
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL },
+      },
+      "disabled",
+   },
+#endif /* !DRC_DISABLE && !LIGHTREC */
 
    { NULL, NULL, NULL, {{0}}, NULL },
 };

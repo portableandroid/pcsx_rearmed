@@ -570,6 +570,8 @@ void cdrInterrupt() {
 	int error = 0;
 	int delay;
 	unsigned int seekTime = 0;
+	u8 set_loc[3];
+	int i;
 
 	// Reschedule IRQ
 	if (cdr.Stat) {
@@ -603,6 +605,31 @@ void cdrInterrupt() {
 			break;
 
 		case CdlSetloc:
+			CDR_LOG("CDROM setloc command (%02X, %02X, %02X)\n", cdr.Param[0], cdr.Param[1], cdr.Param[2]);
+
+			// MM must be BCD, SS must be BCD and <0x60, FF must be BCD and <0x75
+			if (((cdr.Param[0] & 0x0F) > 0x09) || (cdr.Param[0] > 0x99) || ((cdr.Param[1] & 0x0F) > 0x09) || (cdr.Param[1] >= 0x60) || ((cdr.Param[2] & 0x0F) > 0x09) || (cdr.Param[2] >= 0x75))
+			{
+				CDR_LOG("Invalid/out of range seek to %02X:%02X:%02X\n", cdr.Param[0], cdr.Param[1], cdr.Param[2]);
+				error = ERROR_INVALIDARG;
+				goto set_error;
+			}
+			else
+			{
+				for (i = 0; i < 3; i++)
+				{
+					set_loc[i] = btoi(cdr.Param[i]);
+				}
+
+				i = msf2sec(cdr.SetSectorPlay);
+				i = abs(i - msf2sec(set_loc));
+				if (i > 16)
+					cdr.Seeked = SEEK_PENDING;
+
+				memcpy(cdr.SetSector, set_loc, 3);
+				cdr.SetSector[3] = 0;
+				cdr.SetlocPending = 1;
+			}
 			break;
 
 		do_CdlPlay:
@@ -812,9 +839,6 @@ void cdrInterrupt() {
 		case CdlGetlocP:
 			SetResultSize(8);
 			memcpy(&cdr.Result, &cdr.subq, 8);
-
-			if (!cdr.Play && !cdr.Reading)
-				cdr.Result[1] = 0; // HACK?
 			break;
 
 		case CdlReadT: // SetSession?
@@ -1181,6 +1205,19 @@ void cdrReadInterrupt() {
 			int ret = xa_decode_sector(&cdr.Xa, cdr.Transfer+4, cdr.FirstSector);
 			if (!ret) {
 				cdrAttenuate(cdr.Xa.pcm, cdr.Xa.nsamples, cdr.Xa.stereo);
+				/*
+				 * Gameblabla -
+				 * This is a hack for Megaman X4, Castlevania etc...
+				 * that regressed from the new m_locationChanged and CDROM timings changes.
+				 * It is mostly noticeable in Castevania however and the stuttering can be very jarring.
+				 * 
+				 * According to PCSX redux authors, we shouldn't cause a location change if
+				 * the sector difference is too small. 
+				 * I attempted to go with that approach but came empty handed.
+				 * So for now, let's just set cdr.m_locationChanged to false when playing back any ADPCM samples.
+				 * This does not regress Crash Team Racing's intro at least.
+				*/
+				cdr.m_locationChanged = FALSE;
 				SPU_playADPCMchannel(&cdr.Xa);
 				cdr.FirstSector = 0;
 			}
@@ -1274,9 +1311,6 @@ unsigned char cdrRead1(void) {
 }
 
 void cdrWrite1(unsigned char rt) {
-	u8 set_loc[3];
-	int i;
-
 	CDR_LOG_IO("cdr w1: %02x\n", rt);
 
 	switch (cdr.Ctrl & 3) {
@@ -1310,32 +1344,6 @@ void cdrWrite1(unsigned char rt) {
 	AddIrqQueue(cdr.Cmd, 0x800);
 
 	switch (cdr.Cmd) {
-	case CdlSetloc:
-		CDR_LOG("CDROM setloc command (%02X, %02X, %02X)\n", cdr.Param[0], cdr.Param[1], cdr.Param[2]);
-
-		// MM must be BCD, SS must be BCD and <0x60, FF must be BCD and <0x75
-		if (((cdr.Param[0] & 0x0F) > 0x09) || (cdr.Param[0] > 0x99) || ((cdr.Param[1] & 0x0F) > 0x09) || (cdr.Param[1] >= 0x60) || ((cdr.Param[2] & 0x0F) > 0x09) || (cdr.Param[2] >= 0x75))
-		{
-			CDR_LOG("Invalid/out of range seek to %02X:%02X:%02X\n", cdr.Param[0], cdr.Param[1], cdr.Param[2]);
-		}
-		else
-		{
-			for (i = 0; i < 3; i++)
-			{
-				set_loc[i] = btoi(cdr.Param[i]);
-			}
-
-			i = msf2sec(cdr.SetSectorPlay);
-			i = abs(i - msf2sec(set_loc));
-			if (i > 16)
-				cdr.Seeked = SEEK_PENDING;
-
-			memcpy(cdr.SetSector, set_loc, 3);
-			cdr.SetSector[3] = 0;
-			cdr.SetlocPending = 1;
-		}
-		break;
-
 	case CdlReadN:
 	case CdlReadS:
 	case CdlPause:

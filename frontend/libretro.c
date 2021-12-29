@@ -671,7 +671,7 @@ void retro_get_system_info(struct retro_system_info *info)
 #endif
    memset(info, 0, sizeof(*info));
    info->library_name     = "PCSX-ReARMed";
-   info->library_version  = "r22" GIT_VERSION;
+   info->library_version  = "r23l" GIT_VERSION;
    info->valid_extensions = "bin|cue|img|mdf|pbp|toc|cbn|m3u|chd";
    info->need_fullpath    = true;
 }
@@ -1650,7 +1650,7 @@ static void update_variables(bool in_flight)
          display_internal_fps = true;
    }
 
-#if defined(LIGHTREC) || defined(NEW_DYNAREC)
+#ifndef DRC_DISABLE
    var.value = NULL;
    var.key = "pcsx_rearmed_drc";
 
@@ -1683,7 +1683,8 @@ static void update_variables(bool in_flight)
          psxCpu->Reset(); // not really a reset..
       }
    }
-#endif /* LIGHTREC || NEW_DYNAREC */
+#endif /* !DRC_DISABLE */
+   psxCpu->ApplyConfig();
 
    var.value = NULL;
    var.key = "pcsx_rearmed_spu_reverb";
@@ -1722,7 +1723,6 @@ static void update_variables(bool in_flight)
          Config.RCntFix = 1;
    }
    
-#ifdef ICACHE_EMULATION
    var.value = NULL;
    var.key = "pcsx_rearmed_icache_emulation";
 
@@ -1733,7 +1733,6 @@ static void update_variables(bool in_flight)
       else if (strcmp(var.value, "enabled") == 0)
          Config.icache_emulation = 1;
    }
-#endif
 
    var.value = NULL;
    var.key = "pcsx_rearmed_inuyasha_fix";
@@ -2076,7 +2075,7 @@ static void update_variables(bool in_flight)
       GunconAdjustRatioY = atof(var.value);
    }
 
-#ifdef NEW_DYNAREC
+#if !defined(DRC_DISABLE) && !defined(LIGHTREC)
    var.value = NULL;
    var.key = "pcsx_rearmed_nosmccheck";
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
@@ -2115,7 +2114,27 @@ static void update_variables(bool in_flight)
       int psxclock = atoi(var.value);
       cycle_multiplier = 10000 / psxclock;
    }
-#endif /* NEW_DYNAREC */
+
+   var.value = NULL;
+   var.key = "pcsx_rearmed_nocompathacks";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (strcmp(var.value, "enabled") == 0)
+         new_dynarec_hacks |= NDHACK_NO_COMPAT_HACKS;
+      else
+         new_dynarec_hacks &= ~NDHACK_NO_COMPAT_HACKS;
+   }
+#endif /* !DRC_DISABLE && !LIGHTREC */
+
+   var.value = NULL;
+   var.key = "pcsx_rearmed_nostalls";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (strcmp(var.value, "enabled") == 0)
+         Config.DisableStalls = 1;
+      else
+         Config.DisableStalls = 0;
+   }
 
    var.value = NULL;
    var.key = "pcsx_rearmed_input_sensitivity";

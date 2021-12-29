@@ -4,7 +4,6 @@ DEBUG ?= 0
 WANT_ZLIB ?= 1
 HAVE_CHD ?= 1
 USE_LIBRETRO_VFS ?= 0
-ENABLE_ICACHE_EMULATION ?= 1
 
 # Dynarec options: lightrec, ari64
 DYNAREC ?= lightrec
@@ -76,7 +75,7 @@ else ifneq (,$(findstring h5,$(platform)))
 	fpic := -fPIC
 	SHARED := -shared -Wl,-version-script=link.T
 	ARCH = arm64
-	DYNAREC ?= lightrec
+	DYNAREC ?= ari64
 	CFLAGS += -fomit-frame-pointer -ffast-math -DARM
 	CPUFLAGS += -march=armv8-a+crc -mfpu=neon-fp-armv8 -mcpu=cortex-a53 -mtune=cortex-a53
 
@@ -237,8 +236,6 @@ else ifeq ($(platform), vita)
 	BUILTIN_GPU = neon
 
 	DYNAREC = ari64
-	DRC_CACHE_BASE = 0
-
 	ARCH = arm
 	STATIC_LINKING = 1
 
@@ -262,7 +259,6 @@ else ifeq ($(platform), ctr)
 	BUILTIN_GPU = unai
 	THREAD_RENDERING = 1
 	DYNAREC = ari64
-	DRC_CACHE_BASE = 0
 	ARCH = arm
 	HAVE_NEON = 0
 	STATIC_LINKING = 1
@@ -296,7 +292,6 @@ else ifeq ($(platform), qnx)
 	CC_AS = $(CC)
 	HAVE_NEON = 1
 	DYNAREC = ari64
-	DRC_CACHE_BASE = 0
 	BUILTIN_GPU = neon
 	ARCH = arm
 	CFLAGS += -D__BLACKBERRY_QNX__ -marm -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=neon -mfloat-abi=softfp
@@ -305,6 +300,17 @@ else ifeq ($(platform), qnx)
 	LIBPTHREAD :=
 	LIBDL :=
 	LIBM :=
+
+#Raspberry Pi 1
+else ifeq ($(platform), rpi1)
+	TARGET := $(TARGET_NAME)_libretro.so
+	fpic := -fPIC
+	CFLAGS += -marm -mcpu=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard
+	ASFLAGS += -mcpu=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard
+	HAVE_NEON = 0
+	ARCH = arm
+	BUILTIN_GPU = unai
+	DYNAREC = ari64
 
 #Raspberry Pi 2
 else ifeq ($(platform), rpi2)
@@ -328,6 +334,15 @@ else ifeq ($(platform), rpi3)
 	BUILTIN_GPU = neon
 	DYNAREC = ari64
 
+#Raspberry Pi 3 with a 64bit GNU/Linux OS
+else ifeq ($(platform), rpi3_64)
+	TARGET := $(TARGET_NAME)_libretro.so
+	ARCH := arm64
+	BUILTIN_GPU = unai
+	DYNAREC = ari64
+	fpic := -fPIC
+	CFLAGS += -march=armv8-a+crc+simd -mtune=cortex-a53 -ftree-vectorize
+
 #Raspberry Pi 4 with a 32bit GNU/Linux OS
 else ifeq ($(platform), rpi4)
 	TARGET := $(TARGET_NAME)_libretro.so
@@ -344,7 +359,7 @@ else ifeq ($(platform), rpi4_64)
         TARGET := $(TARGET_NAME)_libretro.so
         ARCH := arm64
         BUILTIN_GPU = unai
-        DYNAREC = lightrec
+	DYNAREC = ari64
         fpic := -fPIC
         CFLAGS += -march=armv8-a+crc+simd -mtune=cortex-a72 -ftree-vectorize
 
@@ -403,7 +418,6 @@ else ifneq (,$(findstring armv,$(platform)))
 	TARGET := $(TARGET_NAME)_libretro.so
 	fpic := -fPIC
 	HAVE_NEON = 0
-	DRC_CACHE_BASE = 0
 	BUILTIN_GPU = peops
 	ifneq (,$(findstring cortexa8,$(platform)))
 		CFLAGS += -marm -mcpu=cortex-a8
