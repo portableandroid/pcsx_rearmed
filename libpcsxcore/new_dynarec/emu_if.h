@@ -18,8 +18,6 @@ extern int reg_cop0[];
 #define Cause    psxRegs.CP0.n.Cause
 #define EPC      psxRegs.CP0.n.EPC
 #define BadVAddr psxRegs.CP0.n.BadVAddr
-#define Context  psxRegs.CP0.n.Context
-#define EntryHi  psxRegs.CP0.n.EntryHi
 #define Count    psxRegs.cycle // psxRegs.CP0.n.Count
 
 /* COP2/GTE */
@@ -68,14 +66,15 @@ void jump_handler_write32(u32 addr, u32 data, u32 cycles, u32 *table);
 void jump_handler_write_h(u32 addr, u32 data, u32 cycles, void *handler);
 void jump_handle_swl(u32 addr, u32 data, u32 cycles);
 void jump_handle_swr(u32 addr, u32 data, u32 cycles);
-void rcnt0_read_count_m0(u32 addr, u32, u32 cycles);
-void rcnt0_read_count_m1(u32 addr, u32, u32 cycles);
-void rcnt1_read_count_m0(u32 addr, u32, u32 cycles);
-void rcnt1_read_count_m1(u32 addr, u32, u32 cycles);
-void rcnt2_read_count_m0(u32 addr, u32, u32 cycles);
-void rcnt2_read_count_m1(u32 addr, u32, u32 cycles);
+u32  rcnt0_read_count_m0(u32 addr, u32, u32 cycles);
+u32  rcnt0_read_count_m1(u32 addr, u32, u32 cycles);
+u32  rcnt1_read_count_m0(u32 addr, u32, u32 cycles);
+u32  rcnt1_read_count_m1(u32 addr, u32, u32 cycles);
+u32  rcnt2_read_count_m0(u32 addr, u32, u32 cycles);
+u32  rcnt2_read_count_m1(u32 addr, u32, u32 cycles);
 
 extern unsigned int address;
+extern unsigned int hack_addr;
 extern void *psxH_ptr;
 extern void *zeromem_ptr;
 extern void *scratch_buf_ptr;

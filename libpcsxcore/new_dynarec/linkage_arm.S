@@ -34,6 +34,7 @@
 #define gen_interupt		ESYM(gen_interupt)
 #define invalidate_addr		ESYM(invalidate_addr)
 #define gteCheckStallRaw	ESYM(gteCheckStallRaw)
+#define psxException		ESYM(psxException)
 #endif
 
 	.bss
@@ -60,7 +61,7 @@ DRC_VAR(pending_exception, 4)
 DRC_VAR(stop, 4)
 DRC_VAR(branch_target, 4)
 DRC_VAR(address, 4)
-@DRC_VAR(align0, 4) /* unused/alignment */
+DRC_VAR(hack_addr, 4)
 DRC_VAR(psxRegs, LO_psxRegs_end - LO_psxRegs)
 
 /* psxRegs */
@@ -263,7 +264,7 @@ FUNCTION(dyna_linker):
 	beq	dyna_linker
 	/* pagefault */
 	mov	r1, r0
-	mov	r2, #8
+	mov	r2, #(4<<2)  /* Address error (fetch) */
 	.size	dyna_linker, .-dyna_linker
 
 FUNCTION(exec_pagefault):
@@ -271,21 +272,13 @@ FUNCTION(exec_pagefault):
 	/* r1 = fault address */
 	/* r2 = cause */
 	ldr	r3, [fp, #LO_reg_cop0+48] /* Status */
-	mvn	r6, #0xF000000F
-	ldr	r4, [fp, #LO_reg_cop0+16] /* Context */
-	bic	r6, r6, #0x0F800000
 	str	r0, [fp, #LO_reg_cop0+56] /* EPC */
 	orr	r3, r3, #2
 	str	r1, [fp, #LO_reg_cop0+32] /* BadVAddr */
-	bic	r4, r4, r6
 	str	r3, [fp, #LO_reg_cop0+48] /* Status */
-	and	r5, r6, r1, lsr #9
 	str	r2, [fp, #LO_reg_cop0+52] /* Cause */
-	and	r1, r1, r6, lsl #9
-	str	r1, [fp, #LO_reg_cop0+40] /* EntryHi */
-	orr	r4, r4, r5
-	str	r4, [fp, #LO_reg_cop0+16] /* Context */
 	mov	r0, #0x80000000
+	orr	r0, r0, #0x80
 	bl	get_addr_ht
 	mov	pc, r0
 	.size	exec_pagefault, .-exec_pagefault
@@ -439,7 +432,7 @@ FUNCTION(cc_interrupt):
 	and	r2, r2, r10, lsr #17
 	add	r3, fp, #LO_restore_candidate
 	str	r10, [fp, #LO_cycle]		/* PCSX cycles */
-@@	str	r10, [fp, #LO_reg_cop0+36]	/* Count */
+@@	str	r10, [fp, #LO_reg_cop0+36]	/* Count - not on PSX */
 	ldr	r4, [r2, r3]
 	mov	r10, lr
 	tst	r4, r4
@@ -497,19 +490,28 @@ FUNCTION(fp_exception_ds):
 	.size	fp_exception_ds, .-fp_exception_ds
 
 	.align	2
+FUNCTION(jump_break_ds):
+	mov	r0, #0x24
+	mov	r1, #1
+	b	call_psxException
+FUNCTION(jump_break):
+	mov	r0, #0x24
+	mov	r1, #0
+	b	call_psxException
+FUNCTION(jump_syscall_ds):
+	mov	r0, #0x20
+	mov	r1, #1
+	b	call_psxException
 FUNCTION(jump_syscall):
-	ldr	r1, [fp, #LO_reg_cop0+48] /* Status */
-	mov	r3, #0x80000000
-	str	r0, [fp, #LO_reg_cop0+56] /* EPC */
-	orr	r1, #2
-	mov	r2, #0x20
-	str	r1, [fp, #LO_reg_cop0+48] /* Status */
-	str	r2, [fp, #LO_reg_cop0+52] /* Cause */
-	add	r0, r3, #0x80
-	bl	get_addr_ht
-	mov	pc, r0
-	.size	jump_syscall, .-jump_syscall
-	.align	2
+	mov	r0, #0x20
+	mov	r1, #0
+
+call_psxException:
+	ldr	r3, [fp, #LO_last_count]
+	str	r2, [fp, #LO_pcaddr]
+	add	r10, r3, r10
+	str	r10, [fp, #LO_cycle]		/* PCSX cycles */
+	bl	psxException
 
 	/* note: psxException might do recursive recompiler call from it's HLE code,
 	 * so be ready for this */
@@ -837,5 +839,45 @@ FUNCTION(call_gteStall):
 	ldr	lr, [fp, #LO_saved_lr]
 	add	r10, r10, r0
 	bx	lr
+
+#ifdef HAVE_ARMV6
+
+FUNCTION(get_reg):
+	ldr	r12, [r0]
+	and	r1, r1, #0xff
+	ldr	r2, [r0, #4]
+	orr	r1, r1, r1, lsl #8
+	ldr	r3, [r0, #8]
+	orr	r1, r1, r1, lsl #16   @ searched char in every byte
+	ldrb    r0, [r0, #12]         @ last byte
+	eor	r12, r12, r1
+	eor	r2, r2, r1
+	eor	r3, r3, r1
+	cmp     r0, r1, lsr #24
+	mov	r0, #12
+	mvn	r1, #0                @ r1=~0
+	bxeq	lr
+	orr	r3, r3, #0xff000000   @ EXCLUDE_REG
+	uadd8	r0, r12, r1           @ add and set GE bits when not 0 (match)
+	mov	r12, #0
+	sel	r0, r12, r1           @ 0 if no match, else ff in some byte
+	uadd8	r2, r2, r1
+	sel	r2, r12, r1
+	uadd8	r3, r3, r1
+	sel	r3, r12, r1
+	mov	r12, #3
+	clz     r0, r0                @ 0, 8, 16, 24 or 32
+	clz     r2, r2
+	clz     r3, r3
+	sub	r0, r12, r0, lsr #3   @ 3, 2, 1, 0 or -1
+	sub	r2, r12, r2, lsr #3
+	sub	r3, r12, r3, lsr #3
+	orr	r2, r2, #4
+	orr	r3, r3, #8
+	and	r0, r0, r2
+	and	r0, r0, r3
+	bx	lr
+
+#endif /* HAVE_ARMV6 */
 
 @ vim:filetype=armasm

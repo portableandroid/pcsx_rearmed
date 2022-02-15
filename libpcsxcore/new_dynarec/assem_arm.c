@@ -101,8 +101,6 @@ const u_int invalidate_addr_reg[16] = {
   0,
   0};
 
-static u_int needs_clear_cache[1<<(TARGET_SIZE_2-17)];
-
 /* Linker */
 
 static void set_jump_target(void *addr, void *target_)
@@ -524,12 +522,8 @@ static void emit_pcreladdr(u_int rt)
 
 static void emit_loadreg(int r, int hr)
 {
-  if(r&64) {
-    SysPrintf("64bit load in 32bit mode!\n");
-    assert(0);
-    return;
-  }
-  if((r&63)==0)
+  assert(hr != EXCLUDE_REG);
+  if (r == 0)
     emit_zeroreg(hr);
   else {
     void *addr;
@@ -547,18 +541,14 @@ static void emit_loadreg(int r, int hr)
     }
     u_int offset = (u_char *)addr - (u_char *)&dynarec_local;
     assert(offset<4096);
-    assem_debug("ldr %s,fp+%d\n",regname[hr],offset);
+    assem_debug("ldr %s,fp+%d # r%d\n",regname[hr],offset,r);
     output_w32(0xe5900000|rd_rn_rm(hr,FP,0)|offset);
   }
 }
 
 static void emit_storereg(int r, int hr)
 {
-  if(r&64) {
-    SysPrintf("64bit store in 32bit mode!\n");
-    assert(0);
-    return;
-  }
+  assert(hr != EXCLUDE_REG);
   int addr = (int)&psxRegs.GPR.r[r];
   switch (r) {
   //case HIREG: addr = &hi; break;
@@ -568,7 +558,7 @@ static void emit_storereg(int r, int hr)
   }
   u_int offset = addr-(u_int)&dynarec_local;
   assert(offset<4096);
-  assem_debug("str %s,fp+%d\n",regname[hr],offset);
+  assem_debug("str %s,fp+%d # r%d\n",regname[hr],offset,r);
   output_w32(0xe5800000|rd_rn_rm(hr,FP,0)|offset);
 }
 
@@ -1642,7 +1632,8 @@ static void emit_extjump2(u_char *addr, u_int target, void *linker)
 
   emit_loadlp(target,0);
   emit_loadlp((u_int)addr,1);
-  assert(addr>=ndrc->translation_cache&&addr<(ndrc->translation_cache+(1<<TARGET_SIZE_2)));
+  assert(ndrc->translation_cache <= addr &&
+         addr < ndrc->translation_cache + sizeof(ndrc->translation_cache));
   //assert((target>=0x80000000&&target<0x80800000)||(target>0xA4000000&&target<0xA4001000));
 //DEBUG >
 #ifdef DEBUG_CYCLE_COUNT
@@ -1809,7 +1800,7 @@ static void inline_readstub(enum stub_type type, int i, u_int addr,
 {
   int rs=get_reg(regmap,target);
   int rt=get_reg(regmap,target);
-  if(rs<0) rs=get_reg(regmap,-1);
+  if(rs<0) rs=get_reg_temp(regmap);
   assert(rs>=0);
   u_int is_dynamic;
   uintptr_t host_addr = 0;
@@ -1963,7 +1954,7 @@ static void do_writestub(int n)
 static void inline_writestub(enum stub_type type, int i, u_int addr,
   const signed char regmap[], int target, int adj, u_int reglist)
 {
-  int rs=get_reg(regmap,-1);
+  int rs=get_reg_temp(regmap);
   int rt=get_reg(regmap,target);
   assert(rs>=0);
   assert(rt>=0);
