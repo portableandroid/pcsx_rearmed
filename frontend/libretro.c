@@ -2191,6 +2191,24 @@ static void update_variables(bool in_flight)
       }
 
       /* dfinput_activate(); */
+#ifdef PORTANDROID
+      // set controller input type
+      for(int i=0; i<CB_MAX_INPUT_NUM; i++) {
+         var.value = NULL;
+         var.key = cb_pcsx_pads[i];
+         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+            int j = 0;
+            while(pads[j].desc != NULL) {
+               if(!strcmp(var.value, pads[j].desc)) {
+                  retro_set_controller_port_device(i, pads[j].id);
+                  break;
+               }
+               j++;
+            }
+         }
+      }
+#endif
+
    }
    else
    {
