@@ -79,55 +79,26 @@ DRC_VAR(zeromem_ptr, 8)
 DRC_VAR(scratch_buf_ptr, 8)
 DRC_VAR(ram_offset, 8)
 DRC_VAR(mini_ht, 256)
-DRC_VAR(restore_candidate, 512)
 
 
 	.text
 	.align	2
 
-/* r0 = virtual target address */
-/* r1 = instruction to patch */
-.macro dyna_linker_main
-	/* XXX TODO: should be able to do better than this... */
-	bl	get_addr_ht
-	br	x0
-.endm
-
-
 FUNCTION(dyna_linker):
 	/* r0 = virtual target address */
 	/* r1 = instruction to patch */
-	dyna_linker_main
+	bl	ndrc_get_addr_ht
+	br	x0
 	.size	dyna_linker, .-dyna_linker
-
-FUNCTION(exec_pagefault):
-	/* r0 = instruction pointer */
-	/* r1 = fault address */
-	/* r2 = cause */
-	bl	abort
-	.size	exec_pagefault, .-exec_pagefault
-
-/* Special dynamic linker for the case where a page fault
-   may occur in a branch delay slot */
-FUNCTION(dyna_linker_ds):
-	/* r0 = virtual target address */
-	/* r1 = instruction to patch */
-	dyna_linker_main
-	.size	dyna_linker_ds, .-dyna_linker_ds
 
 	.align	2
 FUNCTION(cc_interrupt):
 	ldr	w0, [rFP, #LO_last_count]
-	mov	w2, #0x1fc
 	add	rCC, w0, rCC
 	str	wzr, [rFP, #LO_pending_exception]
-	and	w2, w2, rCC, lsr #17
-	add	x3, rFP, #LO_restore_candidate
 	str	rCC, [rFP, #LO_cycle]		/* PCSX cycles */
 #	str	rCC, [rFP, #LO_reg_cop0+36]	/* Count */
-	ldr	w19, [x3, w2, uxtw]
 	mov	x21, lr
-	cbnz	w19, 4f
 1:
 	bl	gen_interupt
 	mov	lr, x21
@@ -142,22 +113,8 @@ FUNCTION(cc_interrupt):
 	ret
 2:
 	ldr	w0, [rFP, #LO_pcaddr]
-	bl	get_addr_ht
+	bl	ndrc_get_addr_ht
 	br	x0
-4:
-	/* Move 'dirty' blocks to the 'clean' list */
-	lsl	w20, w2, #3
-	str	wzr, [x3, w2, uxtw]
-5:
-	mov	w0, w20
-	add	w20, w20, #1
-	tbz	w19, #0, 6f
-	bl	clean_blocks
-6:
-	lsr	w19, w19, #1
-	tst	w20, #31
-	bne	5b
-	b	1b
 	.size	cc_interrupt, .-cc_interrupt
 
 	.align	2
@@ -172,7 +129,7 @@ FUNCTION(fp_exception):
 	str	w1, [rFP, #LO_reg_cop0+48] /* Status */
 	str	w2, [rFP, #LO_reg_cop0+52] /* Cause */
 	add	w0, w3, #0x80
-	bl	get_addr_ht
+	bl	ndrc_get_addr_ht
 	br	x0
 	.size	fp_exception, .-fp_exception
 	.align	2
@@ -213,7 +170,7 @@ FUNCTION(jump_to_new_pc):
 	ldr	w0, [rFP, #LO_pcaddr]
 	sub	rCC, rCC, w1
 	str	w1, [rFP, #LO_last_count]
-	bl	get_addr_ht
+	bl	ndrc_get_addr_ht
 	br	x0
 	.size	jump_to_new_pc, .-jump_to_new_pc
 
@@ -232,7 +189,7 @@ FUNCTION(new_dyna_start):
 	ldr	w0,  [rFP, #LO_pcaddr]
 	str	w1,  [rFP, #LO_last_count]
 	sub	rCC, w2, w1
-	bl	get_addr_ht
+	bl	ndrc_get_addr_ht
 	br	x0
 	.size	new_dyna_start, .-new_dyna_start
 

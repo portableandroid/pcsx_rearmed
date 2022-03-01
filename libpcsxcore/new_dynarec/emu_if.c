@@ -302,7 +302,6 @@ static int ari64_init()
 	static u32 scratch_buf[8*8*2] __attribute__((aligned(64)));
 	extern void (*psxCP2[64])();
 	extern void psxNULL();
-	extern unsigned char *out;
 	size_t i;
 
 	new_dynarec_init();
@@ -332,10 +331,6 @@ static int ari64_init()
 	zeromem_ptr = zero_mem;
 	scratch_buf_ptr = scratch_buf;
 
-	SysPrintf("Mapped (RAM/scrp/ROM/LUTs/TC):\n");
-	SysPrintf("%p/%p/%p/%p/%p\n",
-		psxM, psxH, psxR, mem_rtab, out);
-
 	return 0;
 }
 
@@ -343,7 +338,7 @@ static void ari64_reset()
 {
 	printf("ari64_reset\n");
 	new_dyna_pcsx_mem_reset();
-	invalidate_all_pages();
+	new_dynarec_invalidate_all_pages();
 	new_dyna_restore();
 	pending_exception = 1;
 }
@@ -373,21 +368,11 @@ static void ari64_execute()
 
 static void ari64_clear(u32 addr, u32 size)
 {
-	u32 start, end, main_ram;
-
 	size *= 4; /* PCSX uses DMA units (words) */
 
 	evprintf("ari64_clear %08x %04x\n", addr, size);
 
-	/* check for RAM mirrors */
-	main_ram = (addr & 0xffe00000) == 0x80000000;
-
-	start = addr >> 12;
-	end = (addr + size) >> 12;
-
-	for (; start <= end; start++)
-		if (!main_ram || !invalid_code[start])
-			invalidate_block(start);
+	new_dynarec_invalidate_range(addr, addr + size);
 }
 
 static void ari64_notify(int note, void *data) {
@@ -454,15 +439,14 @@ int new_dynarec_hacks;
 void *psxH_ptr;
 void *zeromem_ptr;
 u8 zero_mem[0x1000];
-unsigned char *out;
 void *mem_rtab;
 void *scratch_buf_ptr;
 void new_dynarec_init() {}
 void new_dyna_start(void *context) {}
 void new_dynarec_cleanup() {}
 void new_dynarec_clear_full() {}
-void invalidate_all_pages() {}
-void invalidate_block(unsigned int block) {}
+void new_dynarec_invalidate_all_pages() {}
+void new_dynarec_invalidate_range(unsigned int start, unsigned int end) {}
 void new_dyna_pcsx_mem_init(void) {}
 void new_dyna_pcsx_mem_reset(void) {}
 void new_dyna_pcsx_mem_load_state(void) {}
