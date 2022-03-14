@@ -180,13 +180,7 @@ void new_dyna_freeze(void *f, int mode)
 		bytes = SaveFuncs.read(f, addrs, size);
 		if (bytes != size)
 			return;
-/*			
-#ifdef PORTANDROID
-		//Fix the bug of emulator crash when resume the state saved by dynarec in interpreter mode
-		//Such as: Parasite Eve II
-		if(Config.Cpu == CPU_DYNAREC)
-#endif
-*/
+
 		if (psxCpu != &psxInt)
 			new_dynarec_load_blocks(addrs, size);
 	}
