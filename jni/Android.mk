@@ -16,6 +16,7 @@ INPUT_DIR    := $(ROOT_DIR)/plugins/dfinput
 FRONTEND_DIR := $(ROOT_DIR)/frontend
 NEON_DIR     := $(ROOT_DIR)/plugins/gpu_neon
 UNAI_DIR     := $(ROOT_DIR)/plugins/gpu_unai
+PEOPS_DIR    := $(ROOT_DIR)/plugins/dfxvideo
 DYNAREC_DIR  := $(ROOT_DIR)/libpcsxcore/new_dynarec
 DEPS_DIR     := $(ROOT_DIR)/deps
 LIBRETRO_COMMON := $(ROOT_DIR)/libretro-common
@@ -111,19 +112,28 @@ endif
 
 HAVE_ARI64=0
 HAVE_LIGHTREC=0
+LIGHTREC_CUSTOM_MAP=0
+LIGHTREC_THREADED_COMPILER=0
+HAVE_GPU_NEON=0
 ifeq ($(TARGET_ARCH_ABI),armeabi-v7a)
   HAVE_ARI64=1
+  HAVE_GPU_NEON=1
 else ifeq ($(TARGET_ARCH_ABI),armeabi)
   HAVE_ARI64=1
 else ifeq ($(TARGET_ARCH_ABI),arm64-v8a)
   HAVE_ARI64=1
+  HAVE_GPU_NEON=1
 else ifeq ($(TARGET_ARCH_ABI),x86_64)
   HAVE_LIGHTREC=1
+  HAVE_GPU_NEON=1
 else ifeq ($(TARGET_ARCH_ABI),x86)
   HAVE_LIGHTREC=1
+  HAVE_GPU_NEON=1
 else
   COREFLAGS   += -DDRC_DISABLE
 endif
+  COREFLAGS   += -DLIGHTREC_CUSTOM_MAP=$(LIGHTREC_CUSTOM_MAP)
+  COREFLAGS   += -DLIGHTREC_ENABLE_THREADED_COMPILER=$(LIGHTREC_THREADED_COMPILER)
 
 ifeq ($(HAVE_ARI64),1)
   SOURCES_C   += $(DYNAREC_DIR)/new_dynarec.c \
@@ -142,9 +152,11 @@ ifeq ($(HAVE_LIGHTREC),1)
   COREFLAGS   += -DLIGHTREC -DLIGHTREC_STATIC
   EXTRA_INCLUDES += $(DEPS_DIR)/lightning/include \
 		    $(DEPS_DIR)/lightrec \
+		    $(DEPS_DIR)/lightrec/tlsf \
 		    $(ROOT_DIR)/include/lightning \
 		    $(ROOT_DIR)/include/lightrec
   SOURCES_C   += $(DEPS_DIR)/lightrec/blockcache.c \
+					  $(DEPS_DIR)/lightrec/constprop.c \
 					  $(DEPS_DIR)/lightrec/disassembler.c \
 					  $(DEPS_DIR)/lightrec/emitter.c \
 					  $(DEPS_DIR)/lightrec/interpreter.c \
@@ -161,24 +173,34 @@ ifeq ($(HAVE_LIGHTREC),1)
 					  $(DEPS_DIR)/lightning/lib/jit_print.c \
 					  $(DEPS_DIR)/lightning/lib/jit_size.c \
 					  $(DEPS_DIR)/lightning/lib/lightning.c
-  SOURCES_C   += $(CORE_DIR)/lightrec/plugin.c
+  SOURCES_C   += $(CORE_DIR)/lightrec/plugin.c $(DEPS_DIR)/lightrec/tlsf/tlsf.c
+ifeq ($(LIGHTREC_CUSTOM_MAP),1)
+  SOURCES_C   += $(CORE_DIR)/lightrec/mem.c
+endif
 endif
 
 
-ifeq ($(TARGET_ARCH_ABI),armeabi-v7a)
+ifeq ($(HAVE_GPU_NEON),1)
   COREFLAGS   += -DNEON_BUILD -DTEXTURE_CACHE_4BPP -DTEXTURE_CACHE_8BPP -DGPU_NEON
-  SOURCES_ASM += $(CORE_DIR)/gte_neon.S \
-                 $(NEON_DIR)/psx_gpu/psx_gpu_arm_neon.S \
-                 $(FRONTEND_DIR)/cspace_neon.S
+  ifeq ($(TARGET_ARCH_ABI),armeabi-v7a)
+    COREFLAGS   += -DHAVE_bgr555_to_rgb565 -DHAVE_bgr888_to_x
+    SOURCES_ASM += $(CORE_DIR)/gte_neon.S \
+                   $(NEON_DIR)/psx_gpu/psx_gpu_arm_neon.S \
+                   $(FRONTEND_DIR)/cspace_neon.S
+  else
+    COREFLAGS   += -DSIMD_BUILD
+    SOURCES_C   += $(NEON_DIR)/psx_gpu/psx_gpu_simd.c
+  endif
   SOURCES_C   += $(NEON_DIR)/psx_gpu_if.c
 else ifeq ($(TARGET_ARCH_ABI),armeabi)
-  COREFLAGS += -DUSE_GPULIB=1 -DGPU_UNAI
+  COREFLAGS   += -DUSE_GPULIB=1 -DGPU_UNAI
+  COREFLAGS   += -DHAVE_bgr555_to_rgb565
   SOURCES_ASM += $(UNAI_DIR)/gpu_arm.S \
                  $(FRONTEND_DIR)/cspace_arm.S
   SOURCES_C += $(UNAI_DIR)/gpulib_if.cpp
 else
-  COREFLAGS += -DUSE_GPULIB=1 -DGPU_UNAI
-  SOURCES_C += $(UNAI_DIR)/gpulib_if.cpp
+  COREFLAGS += -fno-strict-aliasing -DGPU_PEOPS
+  SOURCES_C += $(PEOPS_DIR)/gpulib_if.c
 endif
 
 GIT_VERSION := " $(shell git rev-parse --short HEAD || echo unknown)"

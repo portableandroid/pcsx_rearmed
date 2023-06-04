@@ -95,6 +95,8 @@
     8,	/* nei */
     4,	/* movr */
     16,	/* movi */
+    8,	/* movnr */
+    8,	/* movzr */
     4,	/* extr_c */
     4,	/* extr_uc */
     4,	/* extr_s */
@@ -399,4 +401,9 @@
     0,	/* movi_d_ww */
     0,	/* movr_d_w */
     0,	/* movi_d_w */
+    8,	/* bswapr_us */
+    8,	/* bswapr_ui */
+    4,	/* bswapr_ul */
+    28,	/* casr */
+    36,	/* casi */
 #endif /* __WORDSIZE */

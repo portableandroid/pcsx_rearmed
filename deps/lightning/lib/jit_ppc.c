@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012-2019  Free Software Foundation, Inc.
+ * Copyright (C) 2012-2022  Free Software Foundation, Inc.
  *
  * This file is part of GNU lightning.
  *
@@ -1148,6 +1148,8 @@ _emit_code(jit_state_t *_jit)
     jit_word_t		 word;
     jit_int32_t		 value;
     jit_int32_t		 offset;
+    jit_bool_t       no_flag = 0;	/* Set if previous instruction is
+					 * *not* a jump target. */
     struct {
 	jit_node_t	*node;
 	jit_word_t	 word;
@@ -1286,11 +1288,10 @@ _emit_code(jit_state_t *_jit)
 	jit_regarg_set(node, value);
 	switch (node->code) {
 	    case jit_code_align:
-		assert(!(node->u.w & (node->u.w - 1)) &&
-		       node->u.w <= sizeof(jit_word_t));
-		if (node->u.w == sizeof(jit_word_t) &&
-		    (word = _jit->pc.w & (sizeof(jit_word_t) - 1)))
-		    nop(sizeof(jit_word_t) - word);
+		/* Must align to a power of two */
+		assert(!(node->u.w & (node->u.w - 1)));
+		if ((word = _jit->pc.w & (node->u.w - 1)))
+		    nop(node->u.w - word);
 		break;
 	    case jit_code_note:		case jit_code_name:
 		node->u.w = _jit->pc.w;
@@ -1356,8 +1357,27 @@ _emit_code(jit_state_t *_jit)
 #  if __WORDSIZE == 64
 		case_rr(hton, _ul);
 #  endif
+	    case jit_code_bswapr_us:
+		bswapr_us_lh(rn(node->u.w), rn(node->v.w), no_flag);
+		break;
+	    case jit_code_bswapr_ui:
+		bswapr_ui_lw(rn(node->u.w), rn(node->v.w), no_flag);
+		break;
+#  if __WORDSIZE == 64
+		case_rr(bswap, _ul);
+#  endif
 		case_rr(neg,);
 		case_rr(com,);
+	    case jit_code_casr:
+		casr(rn(node->u.w), rn(node->v.w),
+		     rn(node->w.q.l), rn(node->w.q.h));
+		break;
+	    case jit_code_casi:
+		casi(rn(node->u.w), node->v.w,
+		     rn(node->w.q.l), rn(node->w.q.h));
+		break;
+		case_rrr(movn,);
+		case_rrr(movz,);
 		case_rr(mov,);
 	    case jit_code_movi:
 		if (node->flag & jit_flag_node) {
@@ -1676,7 +1696,7 @@ _emit_code(jit_state_t *_jit)
 		    }
 		}
 		else
-		    (void)jmpi_p(node->u.w);
+		    jmpi(node->u.w);
 		break;
 	    case jit_code_callr:
 		callr(rn(node->u.w)
@@ -1816,6 +1836,8 @@ _emit_code(jit_state_t *_jit)
 	assert(_jitc->regarg == 0 && _jitc->synth == 0);
 	/* update register live state */
 	jit_reglive(node);
+
+        no_flag = !(node->flag & jit_flag_patch);
     }
 #undef case_brf
 #undef case_brw

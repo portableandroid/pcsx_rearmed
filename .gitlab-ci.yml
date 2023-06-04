@@ -71,6 +71,10 @@ include:
   # tvOS (AppleTV)
   - project: 'libretro-infrastructure/ci-templates'
     file: '/tvos-arm64.yml'
+
+  # OpenDingux (ARM)
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/dingux-arm32.yml'
     
   #################################### MISC ##################################
 
@@ -112,7 +116,7 @@ libretro-build-linux-i686:
 # MacOS 64-bit
 libretro-build-osx-x64:
   extends:
-    - .libretro-osx-x64-make-default
+    - .libretro-osx-x64-make-10-7
     - .core-defs
 
 # MacOS ARM 64-bit
@@ -181,4 +185,10 @@ libretro-build-ctr:
 libretro-build-libnx-aarch64:
   extends:
     - .libretro-libnx-static-retroarch-master
+    - .core-defs
+
+# Miyoo
+libretro-build-miyoo-arm32:
+  extends:
+    - .libretro-miyoo-arm32-make-default
     - .core-defs

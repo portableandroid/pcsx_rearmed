@@ -3,10 +3,12 @@
  * Copyright (C) 2019-2021 Paul Cercueil <paul@crapouillou.net>
  */
 
+#include "blockcache.h"
 #include "debug.h"
 #include "interpreter.h"
 #include "lightrec-private.h"
 #include "memmanager.h"
+#include "reaper.h"
 #include "slist.h"
 
 #include <errno.h>
@@ -35,8 +37,10 @@ struct recompiler {
 	pthread_cond_t cond;
 	pthread_cond_t cond2;
 	pthread_mutex_t mutex;
-	bool stop;
+	bool stop, must_flush;
 	struct slist_elm slist;
+
+	pthread_mutex_t alloc_mutex;
 
 	unsigned int nb_recs;
 	struct recompiler_thd thds[];
@@ -44,7 +48,7 @@ struct recompiler {
 
 static unsigned int get_processors_count(void)
 {
-	unsigned int nb;
+	unsigned int nb = 1;
 
 #if defined(PTW32_VERSION)
         nb = pthread_num_processors_np();
@@ -53,7 +57,7 @@ static unsigned int get_processors_count(void)
         size_t size = sizeof(count);
 
         nb = sysctlbyname("hw.ncpu", &count, &size, NULL, 0) ? 1 : count;
-#elif defined(__linux__)
+#elif defined(_SC_NPROCESSORS_ONLN)
 	nb = sysconf(_SC_NPROCESSORS_ONLN);
 #endif
 
@@ -75,6 +79,49 @@ static struct slist_elm * lightrec_get_first_elm(struct slist_elm *head)
 	return NULL;
 }
 
+static bool lightrec_cancel_block_rec(struct recompiler *rec,
+				      struct block_rec *block_rec)
+{
+	if (block_rec->compiling) {
+		/* Block is being recompiled - wait for
+		 * completion */
+		pthread_cond_wait(&rec->cond2, &rec->mutex);
+
+		/* We can't guarantee the signal was for us.
+		 * Since block_rec may have been removed while
+		 * we were waiting on the condition, we cannot
+		 * check block_rec->compiling again. The best
+		 * thing is just to restart the function. */
+		return false;
+	}
+
+	/* Block is not yet being processed - remove it from the list */
+	slist_remove(&rec->slist, &block_rec->slist);
+	lightrec_free(rec->state, MEM_FOR_LIGHTREC,
+		      sizeof(*block_rec), block_rec);
+
+	return true;
+}
+
+static void lightrec_cancel_list(struct recompiler *rec)
+{
+	struct block_rec *block_rec;
+	struct slist_elm *elm, *head = &rec->slist;
+
+	for (elm = slist_first(head); elm; elm = slist_first(head)) {
+		block_rec = container_of(elm, struct block_rec, slist);
+		lightrec_cancel_block_rec(rec, block_rec);
+	}
+}
+
+static void lightrec_flush_code_buffer(struct lightrec_state *state, void *d)
+{
+	struct recompiler *rec = d;
+
+	lightrec_remove_outdated_blocks(state->block_cache, NULL);
+	rec->must_flush = false;
+}
+
 static void lightrec_compile_list(struct recompiler *rec,
 				  struct recompiler_thd *thd)
 {
@@ -90,8 +137,27 @@ static void lightrec_compile_list(struct recompiler *rec,
 
 		pthread_mutex_unlock(&rec->mutex);
 
-		if (likely(!(block->flags & BLOCK_IS_DEAD))) {
+		if (likely(!block_has_flag(block, BLOCK_IS_DEAD))) {
 			ret = lightrec_compile_block(thd->cstate, block);
+			if (ret == -ENOMEM) {
+				/* Code buffer is full. Request the reaper to
+				 * flush it. */
+
+				pthread_mutex_lock(&rec->mutex);
+				block_rec->compiling = false;
+				pthread_cond_broadcast(&rec->cond2);
+
+				if (!rec->must_flush) {
+					rec->must_flush = true;
+					lightrec_cancel_list(rec);
+
+					lightrec_reaper_add(rec->state->reaper,
+							    lightrec_flush_code_buffer,
+							    rec);
+				}
+				return;
+			}
+
 			if (ret) {
 				pr_err("Unable to compile block at PC 0x%x: %d\n",
 				       block->pc, ret);
@@ -103,7 +169,7 @@ static void lightrec_compile_list(struct recompiler *rec,
 		slist_remove(&rec->slist, next);
 		lightrec_free(rec->state, MEM_FOR_LIGHTREC,
 			      sizeof(*block_rec), block_rec);
-		pthread_cond_signal(&rec->cond2);
+		pthread_cond_broadcast(&rec->cond2);
 	}
 }
 
@@ -154,7 +220,7 @@ struct recompiler *lightrec_recompiler_init(struct lightrec_state *state)
 
 	for (i = 0; i < nb_recs; i++) {
 		rec->thds[i].cstate = lightrec_create_cstate(state);
-		if (!rec->state) {
+		if (!rec->thds[i].cstate) {
 			pr_err("Cannot create recompiler: Out of memory\n");
 			goto err_free_cstates;
 		}
@@ -162,6 +228,7 @@ struct recompiler *lightrec_recompiler_init(struct lightrec_state *state)
 
 	rec->state = state;
 	rec->stop = false;
+	rec->must_flush = false;
 	rec->nb_recs = nb_recs;
 	slist_init(&rec->slist);
 
@@ -177,10 +244,16 @@ struct recompiler *lightrec_recompiler_init(struct lightrec_state *state)
 		goto err_cnd_destroy;
 	}
 
+	ret = pthread_mutex_init(&rec->alloc_mutex, NULL);
+	if (ret) {
+		pr_err("Cannot init alloc mutex variable: %d\n", ret);
+		goto err_cnd2_destroy;
+	}
+
 	ret = pthread_mutex_init(&rec->mutex, NULL);
 	if (ret) {
 		pr_err("Cannot init mutex variable: %d\n", ret);
-		goto err_cnd2_destroy;
+		goto err_alloc_mtx_destroy;
 	}
 
 	for (i = 0; i < nb_recs; i++) {
@@ -199,6 +272,8 @@ struct recompiler *lightrec_recompiler_init(struct lightrec_state *state)
 
 err_mtx_destroy:
 	pthread_mutex_destroy(&rec->mutex);
+err_alloc_mtx_destroy:
+	pthread_mutex_destroy(&rec->alloc_mutex);
 err_cnd2_destroy:
 	pthread_cond_destroy(&rec->cond2);
 err_cnd_destroy:
@@ -221,6 +296,7 @@ void lightrec_free_recompiler(struct recompiler *rec)
 	/* Stop the thread */
 	pthread_mutex_lock(&rec->mutex);
 	pthread_cond_broadcast(&rec->cond);
+	lightrec_cancel_list(rec);
 	pthread_mutex_unlock(&rec->mutex);
 
 	for (i = 0; i < rec->nb_recs; i++)
@@ -230,6 +306,7 @@ void lightrec_free_recompiler(struct recompiler *rec)
 		lightrec_free_cstate(rec->thds[i].cstate);
 
 	pthread_mutex_destroy(&rec->mutex);
+	pthread_mutex_destroy(&rec->alloc_mutex);
 	pthread_cond_destroy(&rec->cond);
 	pthread_cond_destroy(&rec->cond2);
 	lightrec_free(rec->state, MEM_FOR_LIGHTREC, sizeof(*rec), rec);
@@ -243,9 +320,15 @@ int lightrec_recompiler_add(struct recompiler *rec, struct block *block)
 
 	pthread_mutex_lock(&rec->mutex);
 
+	/* If the recompiler must flush the code cache, we can't add the new
+	 * job. It will be re-added next time the block's address is jumped to
+	 * again. */
+	if (rec->must_flush)
+		goto out_unlock;
+
 	/* If the block is marked as dead, don't compile it, it will be removed
 	 * as soon as it's safe. */
-	if (block->flags & BLOCK_IS_DEAD)
+	if (block_has_flag(block, BLOCK_IS_DEAD))
 		goto out_unlock;
 
 	for (elm = slist_first(&rec->slist), prev = NULL; elm;
@@ -257,7 +340,7 @@ int lightrec_recompiler_add(struct recompiler *rec, struct block *block)
 			 * it to the top of the list, unless the block is being
 			 * recompiled. */
 			if (prev && !block_rec->compiling &&
-			    !(block->flags & BLOCK_SHOULD_RECOMPILE)) {
+			    !block_has_flag(block, BLOCK_SHOULD_RECOMPILE)) {
 				slist_remove_next(prev);
 				slist_append(&rec->slist, elm);
 			}
@@ -268,7 +351,7 @@ int lightrec_recompiler_add(struct recompiler *rec, struct block *block)
 
 	/* By the time this function was called, the block has been recompiled
 	 * and ins't in the wait list anymore. Just return here. */
-	if (block->function && !(block->flags & BLOCK_SHOULD_RECOMPILE))
+	if (block->function && !block_has_flag(block, BLOCK_SHOULD_RECOMPILE))
 		goto out_unlock;
 
 	block_rec = lightrec_malloc(rec->state, MEM_FOR_LIGHTREC,
@@ -287,7 +370,7 @@ int lightrec_recompiler_add(struct recompiler *rec, struct block *block)
 
 	/* If the block is being recompiled, push it to the end of the queue;
 	 * otherwise push it to the front of the queue. */
-	if (block->flags & BLOCK_SHOULD_RECOMPILE)
+	if (block_has_flag(block, BLOCK_SHOULD_RECOMPILE))
 		for (; elm->next; elm = elm->next);
 
 	slist_append(elm, &block_rec->slist);
@@ -312,28 +395,11 @@ void lightrec_recompiler_remove(struct recompiler *rec, struct block *block)
 		for (elm = slist_first(&rec->slist); elm; elm = elm->next) {
 			block_rec = container_of(elm, struct block_rec, slist);
 
-			if (block_rec->block != block)
-				continue;
+			if (block_rec->block == block) {
+				if (lightrec_cancel_block_rec(rec, block_rec))
+					goto out_unlock;
 
-			if (block_rec->compiling) {
-				/* Block is being recompiled - wait for
-				 * completion */
-				pthread_cond_wait(&rec->cond2, &rec->mutex);
-
-				/* We can't guarantee the signal was for us.
-				 * Since block_rec may have been removed while
-				 * we were waiting on the condition, we cannot
-				 * check block_rec->compiling again. The best
-				 * thing is just to restart the function. */
 				break;
-			} else {
-				/* Block is not yet being processed - remove it
-				 * from the list */
-				slist_remove(&rec->slist, elm);
-				lightrec_free(rec->state, MEM_FOR_LIGHTREC,
-					      sizeof(*block_rec), block_rec);
-
-				goto out_unlock;
 			}
 		}
 
@@ -348,31 +414,36 @@ out_unlock:
 void * lightrec_recompiler_run_first_pass(struct lightrec_state *state,
 					  struct block *block, u32 *pc)
 {
-	bool freed;
+	u8 old_flags;
 
 	/* There's no point in running the first pass if the block will never
 	 * be compiled. Let the main loop run the interpreter instead. */
-	if (block->flags & BLOCK_NEVER_COMPILE)
+	if (block_has_flag(block, BLOCK_NEVER_COMPILE))
 		return NULL;
+
+	/* The block is marked as dead, and will be removed the next time the
+	 * reaper is run. In the meantime, the old function can still be
+	 * executed. */
+	if (block_has_flag(block, BLOCK_IS_DEAD))
+		return block->function;
 
 	/* If the block is already fully tagged, there is no point in running
 	 * the first pass. Request a recompilation of the block, and maybe the
 	 * interpreter will run the block in the meantime. */
-	if (block->flags & BLOCK_FULLY_TAGGED)
+	if (block_has_flag(block, BLOCK_FULLY_TAGGED))
 		lightrec_recompiler_add(state->rec, block);
 
 	if (likely(block->function)) {
-		if (block->flags & BLOCK_FULLY_TAGGED) {
-			freed = atomic_flag_test_and_set(&block->op_list_freed);
+		if (block_has_flag(block, BLOCK_FULLY_TAGGED)) {
+			old_flags = block_set_flags(block, BLOCK_NO_OPCODE_LIST);
 
-			if (!freed) {
+			if (!(old_flags & BLOCK_NO_OPCODE_LIST)) {
 				pr_debug("Block PC 0x%08x is fully tagged"
 					 " - free opcode list\n", block->pc);
 
 				/* The block was already compiled but the opcode list
 				 * didn't get freed yet - do it now */
-				lightrec_free_opcode_list(state, block);
-				block->opcode_list = NULL;
+				lightrec_free_opcode_list(state, block->opcode_list);
 			}
 		}
 
@@ -381,24 +452,36 @@ void * lightrec_recompiler_run_first_pass(struct lightrec_state *state,
 
 	/* Mark the opcode list as freed, so that the threaded compiler won't
 	 * free it while we're using it in the interpreter. */
-	freed = atomic_flag_test_and_set(&block->op_list_freed);
+	old_flags = block_set_flags(block, BLOCK_NO_OPCODE_LIST);
 
 	/* Block wasn't compiled yet - run the interpreter */
 	*pc = lightrec_emulate_block(state, block, *pc);
 
-	if (!freed)
-		atomic_flag_clear(&block->op_list_freed);
+	if (!(old_flags & BLOCK_NO_OPCODE_LIST))
+		block_clear_flags(block, BLOCK_NO_OPCODE_LIST);
 
 	/* The block got compiled while the interpreter was running.
 	 * We can free the opcode list now. */
-	if (block->function && (block->flags & BLOCK_FULLY_TAGGED) &&
-	    !atomic_flag_test_and_set(&block->op_list_freed)) {
-		pr_debug("Block PC 0x%08x is fully tagged"
-			 " - free opcode list\n", block->pc);
+	if (block->function && block_has_flag(block, BLOCK_FULLY_TAGGED)) {
+		old_flags = block_set_flags(block, BLOCK_NO_OPCODE_LIST);
 
-		lightrec_free_opcode_list(state, block);
-		block->opcode_list = NULL;
+		if (!(old_flags & BLOCK_NO_OPCODE_LIST)) {
+			pr_debug("Block PC 0x%08x is fully tagged"
+				 " - free opcode list\n", block->pc);
+
+			lightrec_free_opcode_list(state, block->opcode_list);
+		}
 	}
 
 	return NULL;
+}
+
+void lightrec_code_alloc_lock(struct lightrec_state *state)
+{
+	pthread_mutex_lock(&state->rec->alloc_mutex);
+}
+
+void lightrec_code_alloc_unlock(struct lightrec_state *state)
+{
+	pthread_mutex_unlock(&state->rec->alloc_mutex);
 }

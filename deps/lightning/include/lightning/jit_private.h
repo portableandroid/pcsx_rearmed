@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012-2019  Free Software Foundation, Inc.
+ * Copyright (C) 2012-2022  Free Software Foundation, Inc.
  *
  * This file is part of GNU lightning.
  *
@@ -150,6 +150,13 @@ typedef jit_uint64_t		jit_regset_t;
 #  define JIT_RET		_A0
 #  define JIT_FRET		_FA0
 typedef jit_uint64_t		jit_regset_t;
+#elif defined(__loongarch__)
+#  define JIT_RA0		_A0
+#  define JIT_FA0		_FA0
+#  define JIT_SP		_SP
+#  define JIT_RET		_A0
+#  define JIT_FRET		_FA0
+typedef jit_uint64_t		jit_regset_t;
 #endif
 
 #define jit_data(u,v,w)		_jit_data(_jit,u,v,w)
@@ -264,8 +271,9 @@ extern jit_node_t *_jit_data(jit_state_t*, const void*,
 #define jit_cc_a0_flt		0x00000020	/* arg0 is immediate float */
 #define jit_cc_a0_dbl		0x00000040	/* arg0 is immediate double */
 #define jit_cc_a0_arg		0x00000080	/* arg1 is an argument int id */
-#define jit_cc_a1_reg		0x00000100	/* arg1 is a register */
-#define jit_cc_a1_chg		0x00000200	/* arg1 is modified */
+#define jit_cc_a0_cnd		0x00000100	/* arg1 is a conditinally set register */
+#define jit_cc_a1_reg		0x00000200	/* arg1 is a register */
+#define jit_cc_a1_chg		0x00000400	/* arg1 is modified */
 #define jit_cc_a1_int		0x00001000	/* arg1 is immediate word */
 #define jit_cc_a1_flt		0x00002000	/* arg1 is immediate float */
 #define jit_cc_a1_dbl		0x00004000	/* arg1 is immediate double */
@@ -275,6 +283,7 @@ extern jit_node_t *_jit_data(jit_state_t*, const void*,
 #define jit_cc_a2_int		0x00100000	/* arg2 is immediate word */
 #define jit_cc_a2_flt		0x00200000	/* arg2 is immediate float */
 #define jit_cc_a2_dbl		0x00400000	/* arg2 is immediate double */
+#define jit_cc_a2_rlh		0x00800000	/* arg2 is a register pair */
 
 #if __ia64__ || (__sparc__ && __WORDSIZE == 64)
 extern void
@@ -363,6 +372,8 @@ typedef struct jit_register	jit_register_t;
 #  if DISASSEMBLER
 typedef struct jit_data_info	jit_data_info_t;
 #  endif
+#elif __riscv
+typedef struct jit_const	jit_const_t;
 #endif
 
 union jit_data {
@@ -412,6 +423,9 @@ struct jit_block {
     jit_node_t		*label;
     jit_regset_t	 reglive;
     jit_regset_t	 regmask;
+    jit_bool_t		 again;		/* Flag need to rebuild regset masks
+					 * due to changes in live and unknown
+					 * state. */
 };
 
 struct jit_value {
@@ -433,6 +447,12 @@ typedef struct {
 struct jit_data_info {
     jit_uword_t		  code;		/* pointer in code buffer */
     jit_word_t		  length;	/* length of constant vector */
+};
+#elif __riscv && __WORDSIZE == 64
+struct jit_const {
+    jit_word_t		  value;
+    jit_word_t		  address;
+    jit_const_t		 *next;
 };
 #endif
 
@@ -490,7 +510,7 @@ struct jit_compiler {
     jit_int32_t		  breg;		/* base register for prolog/epilog */
 #endif
 #if __mips__ || __ia64__ || __alpha__ || \
-	(__sparc__ && __WORDSIZE == 64) || __riscv
+	(__sparc__ && __WORDSIZE == 64) || __riscv || __loongarch__
     jit_int32_t		  carry;
 #define jit_carry	  _jitc->carry
 #endif
@@ -593,6 +613,27 @@ struct jit_compiler {
 	jit_word_t	  length;
     } prolog;
     jit_bool_t		  jump;
+#elif __riscv && __WORDSIZE == 64
+    struct {
+	/* Hash table for constants to be resolved and patched */
+	struct {
+	    jit_const_t	**table;	/* very simple hash table */
+	    jit_word_t	  size;		/* number of vectors in table */
+	    jit_word_t	  count;	/* number of distinct entries */
+	} hash;
+	struct {
+	    jit_const_t	**ptr;		/* keep a single pointer */
+	    jit_const_t	 *list;		/* free list */
+	    jit_word_t	  length;	/* length of pool */
+	} pool;
+	/* Linear list for constants that cannot be encoded easily */
+	struct {
+	    jit_word_t	 *instrs;	/* list of direct movi instructions */
+	    jit_word_t	 *values;	/* list of direct movi constants */
+	    jit_word_t	  offset;	/* offset in instrs/values vector */
+	    jit_word_t	  length;	/* length of instrs/values vector */
+	} vector;
+    } consts;
 #endif
 #if GET_JIT_SIZE
     /* Temporary storage to calculate instructions length */
@@ -718,6 +759,7 @@ _emit_ldxi_d(jit_state_t*, jit_int32_t, jit_int32_t, jit_word_t);
 extern void
 _emit_stxi_d(jit_state_t*, jit_word_t, jit_int32_t, jit_int32_t);
 
+extern void jit_init_print(void);
 extern void jit_init_debug(const char*);
 extern void jit_finish_debug(void);
 

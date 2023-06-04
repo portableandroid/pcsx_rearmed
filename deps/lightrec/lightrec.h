@@ -47,6 +47,7 @@ struct lightrec_mem_map;
 #define LIGHTREC_EXIT_BREAK	(1 << 1)
 #define LIGHTREC_EXIT_SYSCALL	(1 << 2)
 #define LIGHTREC_EXIT_SEGFAULT	(1 << 3)
+#define LIGHTREC_EXIT_NOMEM	(1 << 4)
 
 enum psx_map {
 	PSX_MAP_KERNEL_USER_RAM,
@@ -58,6 +59,9 @@ enum psx_map {
 	PSX_MAP_MIRROR1,
 	PSX_MAP_MIRROR2,
 	PSX_MAP_MIRROR3,
+	PSX_MAP_CODE_BUFFER,
+
+	PSX_MAP_UNKNOWN,
 };
 
 struct lightrec_mem_map_ops {
@@ -81,8 +85,11 @@ struct lightrec_mem_map {
 };
 
 struct lightrec_ops {
+	void (*cop2_notify)(struct lightrec_state *state, u32 op, u32 data);
 	void (*cop2_op)(struct lightrec_state *state, u32 op);
 	void (*enable_ram)(struct lightrec_state *state, _Bool enable);
+	_Bool (*hw_direct)(u32 kaddr, _Bool is_write, u8 size);
+	void (*code_inv)(void *addr, u32 len);
 };
 
 struct lightrec_registers {
@@ -101,8 +108,8 @@ __api void lightrec_destroy(struct lightrec_state *state);
 
 __api u32 lightrec_execute(struct lightrec_state *state,
 			   u32 pc, u32 target_cycle);
-__api u32 lightrec_execute_one(struct lightrec_state *state, u32 pc);
-__api u32 lightrec_run_interpreter(struct lightrec_state *state, u32 pc);
+__api u32 lightrec_run_interpreter(struct lightrec_state *state,
+				   u32 pc, u32 target_cycle);
 
 __api void lightrec_invalidate(struct lightrec_state *state, u32 addr, u32 len);
 __api void lightrec_invalidate_all(struct lightrec_state *state);

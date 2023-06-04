@@ -23,7 +23,8 @@
 
 #include "psxcounters.h"
 #include "gpu.h"
-#include "debug.h"
+//#include "debug.h"
+#define DebugVSync()
 
 /******************************************************************************/
 
@@ -72,7 +73,6 @@ Rcnt rcnts[ CounterQuantity ];
 u32 hSyncCount = 0;
 u32 frame_counter = 0;
 static u32 hsync_steps = 0;
-static u32 base_cycle = 0;
 
 u32 psxNextCounter = 0, psxNextsCounter = 0;
 
@@ -292,6 +292,27 @@ void psxRcntReset( u32 index )
     }
 }
 
+static void scheduleRcntBase(void)
+{
+    // Schedule next call, in hsyncs
+    if (hSyncCount < VBlankStart)
+        hsync_steps = VBlankStart - hSyncCount;
+    else
+        hsync_steps = HSyncTotal[Config.PsxType] - hSyncCount;
+
+    if (hSyncCount + hsync_steps == HSyncTotal[Config.PsxType])
+    {
+        rcnts[3].cycle = Config.PsxType ? PSXCLK / 50 : PSXCLK / 60;
+    }
+    else
+    {
+        // clk / 50 / 314 ~= 2157.25
+        // clk / 60 / 263 ~= 2146.31
+        u32 mult = Config.PsxType ? 8836089 : 8791293;
+        rcnts[3].cycle = hsync_steps * mult >> 12;
+    }
+}
+
 void psxRcntUpdate()
 {
     u32 cycle;
@@ -299,19 +320,19 @@ void psxRcntUpdate()
     cycle = psxRegs.cycle;
 
     // rcnt 0.
-    if( cycle - rcnts[0].cycleStart >= rcnts[0].cycle )
+    while( cycle - rcnts[0].cycleStart >= rcnts[0].cycle )
     {
         psxRcntReset( 0 );
     }
 
     // rcnt 1.
-    if( cycle - rcnts[1].cycleStart >= rcnts[1].cycle )
+    while( cycle - rcnts[1].cycleStart >= rcnts[1].cycle )
     {
         psxRcntReset( 1 );
     }
 
     // rcnt 2.
-    if( cycle - rcnts[2].cycleStart >= rcnts[2].cycle )
+    while( cycle - rcnts[2].cycleStart >= rcnts[2].cycle )
     {
         psxRcntReset( 2 );
     }
@@ -319,15 +340,12 @@ void psxRcntUpdate()
     // rcnt base.
     if( cycle - rcnts[3].cycleStart >= rcnts[3].cycle )
     {
-        u32 leftover_cycles = cycle - rcnts[3].cycleStart - rcnts[3].cycle;
-        u32 next_vsync;
-
         hSyncCount += hsync_steps;
 
         // VSync irq.
         if( hSyncCount == VBlankStart )
         {
-            HW_GPU_STATUS &= ~PSXGPU_LCF;
+            HW_GPU_STATUS &= SWAP32(~PSXGPU_LCF);
             GPU_vBlank( 1, 0 );
             setIrq( 0x01 );
 
@@ -340,38 +358,25 @@ void psxRcntUpdate()
             }
         }
         
-        // Update lace. (with InuYasha fix)
-        if( hSyncCount >= (Config.VSyncWA ? HSyncTotal[Config.PsxType] / BIAS : HSyncTotal[Config.PsxType]) )
+        // Update lace.
+        if( hSyncCount >= HSyncTotal[Config.PsxType] )
         {
+            rcnts[3].cycleStart += Config.PsxType ? PSXCLK / 50 : PSXCLK / 60;
             hSyncCount = 0;
             frame_counter++;
 
             gpuSyncPluginSR();
-            if( (HW_GPU_STATUS & PSXGPU_ILACE_BITS) == PSXGPU_ILACE_BITS )
-                HW_GPU_STATUS |= frame_counter << 31;
-            GPU_vBlank( 0, HW_GPU_STATUS >> 31 );
+            if ((HW_GPU_STATUS & SWAP32(PSXGPU_ILACE_BITS)) == SWAP32(PSXGPU_ILACE_BITS))
+                HW_GPU_STATUS |= SWAP32(frame_counter << 31);
+            GPU_vBlank(0, SWAP32(HW_GPU_STATUS) >> 31);
         }
 
-        // Schedule next call, in hsyncs
-        hsync_steps = HSyncTotal[Config.PsxType] - hSyncCount;
-        next_vsync = VBlankStart - hSyncCount; // ok to overflow
-        if( next_vsync && next_vsync < hsync_steps )
-            hsync_steps = next_vsync;
-
-        rcnts[3].cycleStart = cycle - leftover_cycles;
-        if (Config.PsxType)
-                // 20.12 precision, clk / 50 / 313 ~= 2164.14
-                base_cycle += hsync_steps * 8864320;
-        else
-                // clk / 60 / 263 ~= 2146.31
-                base_cycle += hsync_steps * 8791293;
-        rcnts[3].cycle = base_cycle >> 12;
-        base_cycle &= 0xfff;
+        scheduleRcntBase();
     }
 
     psxRcntSet();
 
-#ifndef NDEBUG
+#if 0 //ndef NDEBUG
     DebugVSync();
 #endif
 }
@@ -414,18 +419,6 @@ u32 psxRcntRcount( u32 index )
     u32 count;
 
     count = _psxRcntRcount( index );
-
-    // Parasite Eve 2 fix.
-    if( Config.RCntFix )
-    {
-        if( index == 2 )
-        {
-            if( rcnts[index].counterState == CountToTarget )
-            {
-                count /= BIAS;
-            }
-        }
-    }
 
     verboseLog( 2, "[RCNT %i] rcount: %x\n", index, count );
 
@@ -509,15 +502,12 @@ s32 psxRcntFreeze( void *f, s32 Mode )
             count = (psxRegs.cycle - rcnts[i].cycleStart) / rcnts[i].rate;
             _psxRcntWcount( i, count );
         }
-        hsync_steps = 0;
-        if (rcnts[3].target)
-           hsync_steps = (psxRegs.cycle - rcnts[3].cycleStart) / rcnts[3].target;
+        scheduleRcntBase();
         psxRcntSet();
-
-        base_cycle = 0;
     }
 
     return 0;
 }
 
 /******************************************************************************/
+// vim:ts=4:shiftwidth=4:expandtab

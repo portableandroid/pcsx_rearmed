@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012-2019  Free Software Foundation, Inc.
+ * Copyright (C) 2012-2022  Free Software Foundation, Inc.
  *
  * This file is part of GNU lightning.
  *
@@ -369,19 +369,28 @@ static void _movcr_u(jit_state_t*,jit_int32_t,jit_int32_t);
 static void _movsr(jit_state_t*,jit_int32_t,jit_int32_t);
 #  define movsr_u(r0, r1)		_movsr_u(_jit, r0, r1)
 static void _movsr_u(jit_state_t*,jit_int32_t,jit_int32_t);
+#  define casx(r0, r1, r2, r3, i0)	_casx(_jit, r0, r1, r2, r3, i0)
+static void _casx(jit_state_t *_jit,jit_int32_t,jit_int32_t,
+		  jit_int32_t,jit_int32_t,jit_word_t);
+#define casr(r0, r1, r2, r3)		casx(r0, r1, r2, r3, 0)
+#define casi(r0, i0, r1, r2)		casx(r0, _NOREG, r1, r2, i0)
+#define movnr(r0, r1, r2)		_movnr(_jit, r0, r1, r2)
+static void _movnr(jit_state_t*, jit_int32_t, jit_int32_t, jit_int32_t);
+#define movzr(r0, r1, r2)		_movzr(_jit, r0, r1, r2)
+static void _movzr(jit_state_t*, jit_int32_t, jit_int32_t, jit_int32_t);
 #  if __X64 && !__X64_32
 #    define movir(r0, r1)		_movir(_jit, r0, r1)
 static void _movir(jit_state_t*,jit_int32_t,jit_int32_t);
 #    define movir_u(r0, r1)		_movir_u(_jit, r0, r1)
 static void _movir_u(jit_state_t*,jit_int32_t,jit_int32_t);
 #  endif
-#  define htonr_us(r0, r1)		_htonr_us(_jit, r0, r1)
-static void _htonr_us(jit_state_t*,jit_int32_t,jit_int32_t);
-#  define htonr_ui(r0, r1)		_htonr_ui(_jit, r0, r1)
-static void _htonr_ui(jit_state_t*,jit_int32_t,jit_int32_t);
+#  define bswapr_us(r0, r1)		_bswapr_us(_jit, r0, r1)
+static void _bswapr_us(jit_state_t*,jit_int32_t,jit_int32_t);
+#  define bswapr_ui(r0, r1)		_bswapr_ui(_jit, r0, r1)
+static void _bswapr_ui(jit_state_t*,jit_int32_t,jit_int32_t);
 #  if __X64 && !__X64_32
-#define htonr_ul(r0, r1)		_htonr_ul(_jit, r0, r1)
-static void _htonr_ul(jit_state_t*,jit_int32_t,jit_int32_t);
+#define bswapr_ul(r0, r1)		_bswapr_ul(_jit, r0, r1)
+static void _bswapr_ul(jit_state_t*,jit_int32_t,jit_int32_t);
 #endif
 #  define extr_c(r0, r1)		_extr_c(_jit, r0, r1)
 static void _extr_c(jit_state_t*,jit_int32_t,jit_int32_t);
@@ -698,6 +707,7 @@ static void _patch_at(jit_state_t*, jit_node_t*, jit_word_t, jit_word_t);
 #      define ffsl(l)			__builtin_ffsl(l)
 #    endif
 #  endif
+#  define jit_cmov_p()			jit_cpu.cmov
 #endif
 
 #if CODE
@@ -792,44 +802,49 @@ _rx(jit_state_t *_jit, jit_int32_t rd, jit_int32_t md,
 static void
 _nop(jit_state_t *_jit, jit_int32_t count)
 {
-    switch (count) {
-	case 0:
-	    break;
-	case 1:		/* NOP */
-	    ic(0x90);	break;
-	case 2:		/* 66 NOP */
-	    ic(0x66);	ic(0x90);
-	    break;
-	case 3:		/* NOP DWORD ptr [EAX] */
-	    ic(0x0f);	ic(0x1f);	ic(0x00);
-	    break;
-	case 4:		/* NOP DWORD ptr [EAX + 00H] */
-	    ic(0x0f);	ic(0x1f);	ic(0x40);	ic(0x00);
-	    break;
-	case 5:		/* NOP DWORD ptr [EAX + EAX*1 + 00H] */
-	    ic(0x0f);	ic(0x1f);	ic(0x44);	ic(0x00);
-	    ic(0x00);
-	    break;
-	case 6:		/* 66 NOP DWORD ptr [EAX + EAX*1 + 00H] */
-	    ic(0x66);	ic(0x0f);	ic(0x1f);	ic(0x44);
-	    ic(0x00);	ic(0x00);
-	    break;
-	case 7:		/* NOP DWORD ptr [EAX + 00000000H] */
-	    ic(0x0f);	ic(0x1f);	ic(0x80);	ii(0x0000);
-	    break;
-	case 8:		/* NOP DWORD ptr [EAX + EAX*1 + 00000000H] */
-	    ic(0x0f);	ic(0x1f);	ic(0x84);	ic(0x00);
-	    ii(0x0000);
-	    break;
-	case 9:		/* 66 NOP DWORD ptr [EAX + EAX*1 + 00000000H] */
-	    ic(0x66);	ic(0x0f);	ic(0x1f);	ic(0x84);
-	    ic(0x00);	ii(0x0000);
-	    break;
-	default:
-	    abort();
+    jit_int32_t		i;
+    while (count) {
+	if (count > 9)
+	    i = 9;
+	else
+	    i = count;
+	switch (i) {
+	    case 0:
+		break;
+	    case 1:	    /* NOP */
+		ic(0x90);   break;
+	    case 2:	    /* 66 NOP */
+		ic(0x66);   ic(0x90);
+		break;
+	    case 3:	    /* NOP DWORD ptr [EAX] */
+		ic(0x0f);   ic(0x1f);	    ic(0x00);
+		break;
+	    case 4:	    /* NOP DWORD ptr [EAX + 00H] */
+		ic(0x0f);   ic(0x1f);	    ic(0x40);	    ic(0x00);
+		break;
+	    case 5:	    /* NOP DWORD ptr [EAX + EAX*1 + 00H] */
+		ic(0x0f);   ic(0x1f);	    ic(0x44);	    ic(0x00);
+		ic(0x00);
+		break;
+	    case 6:	    /* 66 NOP DWORD ptr [EAX + EAX*1 + 00H] */
+		ic(0x66);   ic(0x0f);	    ic(0x1f);	    ic(0x44);
+		ic(0x00);   ic(0x00);
+		break;
+	    case 7:	    /* NOP DWORD ptr [EAX + 00000000H] */
+		ic(0x0f);   ic(0x1f);	    ic(0x80);	    ii(0x0000);
+		break;
+	    case 8:	    /* NOP DWORD ptr [EAX + EAX*1 + 00000000H] */
+		ic(0x0f);   ic(0x1f);	    ic(0x84);	    ic(0x00);
+		ii(0x0000);
+		break;
+	    case 9:	    /* 66 NOP DWORD ptr [EAX + EAX*1 + 00000000H] */
+		ic(0x66);   ic(0x0f);	    ic(0x1f);	    ic(0x84);
+		ic(0x00);   ii(0x0000);
+		break;
+	}
+	count -= i;
     }
 }
-
 static void
 _lea(jit_state_t *_jit, jit_int32_t md, jit_int32_t rb,
      jit_int32_t ri, jit_int32_t ms, jit_int32_t rd)
@@ -2213,6 +2228,92 @@ _movsr_u(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
     mrm(0x03, r7(r0), r7(r1));
 }
 
+static void
+_casx(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1,
+      jit_int32_t r2, jit_int32_t r3, jit_word_t i0)
+{
+    jit_int32_t		save_rax, restore_rax;
+    jit_int32_t		ascasr_reg, ascasr_use;
+    if (r0 != _RAX_REGNO) {		/* result not in %rax */
+	if (r2 != _RAX_REGNO) {		/* old value not in %rax */
+	    save_rax = jit_get_reg(jit_class_gpr);
+	    movr(rn(save_rax), _RAX_REGNO);
+	    restore_rax = 1;
+	}
+	else
+	    restore_rax = 0;
+    }
+    else
+	restore_rax = 0;
+    if (r2 != _RAX_REGNO)
+	movr(_RAX_REGNO, r2);
+    if (r1 == _NOREG) {			/* using immediate address */
+	if (!can_sign_extend_int_p(i0)) {
+	    ascasr_reg = jit_get_reg(jit_class_gpr);
+	    if (ascasr_reg == _RAX) {
+		ascasr_reg = jit_get_reg(jit_class_gpr);
+		jit_unget_reg(_RAX);
+	    }
+	    ascasr_use = 1;
+	    movi(rn(ascasr_reg), i0);
+	}
+	else
+	    ascasr_use = 0;
+    }
+    else
+	ascasr_use = 0;
+    ic(0xf0);		/* lock */
+    if (ascasr_use)
+	rex(0, WIDE, r3, _NOREG, rn(ascasr_reg));
+    else
+	rex(0, WIDE, r3, _NOREG, r1);
+    ic(0x0f);
+    ic(0xb1);
+    if (r1 != _NOREG)			/* casr */
+	rx(r3, 0, r1, _NOREG, _SCL1);
+    else {				/* casi */
+	if (ascasr_use)
+	    rx(r3, 0, rn(ascasr_reg), _NOREG, _SCL1);	/* address in reg */
+	else
+	    rx(r3, i0, _NOREG, _NOREG, _SCL1);		/* address in offset */
+    }
+    cc(X86_CC_E, r0);
+    if (r0 != _RAX_REGNO)
+	movr(r0, _RAX_REGNO);
+    if (restore_rax) {
+	movr(_RAX_REGNO, rn(save_rax));
+	jit_unget_reg(save_rax);
+    }
+    if (ascasr_use)
+	jit_unget_reg(ascasr_reg);
+}
+
+static void
+_movnr(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1, jit_int32_t r2)
+{
+    assert(jit_cmov_p());
+
+    testr(r2, r2);
+
+    rex(0, WIDE, r0, _NOREG, r1);
+    ic(0x0f);
+    ic(0x45);
+    mrm(0x03, r7(r0), r7(r1));
+}
+
+static void
+_movzr(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1, jit_int32_t r2)
+{
+    assert(jit_cmov_p());
+
+    testr(r2, r2);
+
+    rex(0, WIDE, r0, _NOREG, r1);
+    ic(0x0f);
+    ic(0x44);
+    mrm(0x03, r7(r0), r7(r1));
+}
+
 #if __X64
 static void
 _movir(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
@@ -2232,7 +2333,7 @@ _movir_u(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
 #endif
 
 static void
-_htonr_us(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
+_bswapr_us(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
 {
     extr_us(r0, r1);
     ic(0x66);
@@ -2243,7 +2344,7 @@ _htonr_us(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
 }
 
 static void
-_htonr_ui(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
+_bswapr_ui(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
 {
     movr(r0, r1);
     rex(0, 0, _NOREG, _NOREG, r0);
@@ -2253,7 +2354,7 @@ _htonr_ui(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
 
 #if __X64 && !__X64_32
 static void
-_htonr_ul(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
+_bswapr_ul(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
 {
     movr(r0, r1);
     rex(0, 1, _NOREG, _NOREG, r0);

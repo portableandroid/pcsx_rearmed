@@ -145,10 +145,10 @@ static void save_channel(SPUCHAN_orig *d, const SPUCHAN *s, int ch)
  d->spos = s->spos;
  d->sinc = s->sinc;
  memcpy(d->SB, spu.SB + ch * SB_SIZE, sizeof(d->SB[0]) * SB_SIZE);
- d->iStart = (regAreaGet(ch,6)&~1)<<3;
+ d->iStart = (regAreaGetCh(ch, 6) & ~1) << 3;
  d->iCurr = 0; // set by the caller
  d->iLoop = 0; // set by the caller
- d->bOn = !!(spu.dwChannelOn & (1<<ch));
+ d->bOn = !!(spu.dwChannelsAudible & (1<<ch));
  d->bStop = s->ADSRX.State == ADSR_RELEASE;
  d->bReverb = s->bReverb;
  d->iActFreq = 1;
@@ -187,8 +187,8 @@ static void load_channel(SPUCHAN *d, const SPUCHAN_orig *s, int ch)
  d->sinc = s->sinc;
  d->sinc_inv = 0;
  memcpy(spu.SB + ch * SB_SIZE, s->SB, sizeof(spu.SB[0]) * SB_SIZE);
- d->pCurr = (void *)((long)s->iCurr & 0x7fff0);
- d->pLoop = (void *)((long)s->iLoop & 0x7fff0);
+ d->pCurr = (void *)((uintptr_t)s->iCurr & 0x7fff0);
+ d->pLoop = (void *)((uintptr_t)s->iLoop & 0x7fff0);
  d->bReverb = s->bReverb;
  d->iLeftVolume = s->iLeftVolume;
  d->iRightVolume = s->iRightVolume;
@@ -209,7 +209,7 @@ static void load_channel(SPUCHAN *d, const SPUCHAN_orig *s, int ch)
  d->ADSRX.ReleaseModeExp = s->ADSRX.ReleaseModeExp;
  d->ADSRX.ReleaseRate = s->ADSRX.ReleaseRate;
  d->ADSRX.EnvelopeVol = s->ADSRX.EnvelopeVol;
- if (s->bOn) spu.dwChannelOn |= 1<<ch;
+ if (s->bOn) spu.dwChannelsAudible |= 1<<ch;
  else d->ADSRX.EnvelopeVol = 0;
 }
 
@@ -258,7 +258,7 @@ long CALLBACK SPUfreeze(uint32_t ulFreezeMode, SPUFreeze_t * pF,
    pFO=(SPUOSSFreeze_t *)(pF+1);                       // store special stuff
 
    pFO->spuIrq = spu.regArea[(H_SPUirqAddr - 0x0c00) / 2];
-   if(spu.pSpuIrq) pFO->pSpuIrq  = (unsigned long)spu.pSpuIrq-(unsigned long)spu.spuMemC;
+   if(spu.pSpuIrq) pFO->pSpuIrq = spu.pSpuIrq - spu.spuMemC;
 
    pFO->spuAddr=spu.spuAddr;
    if(pFO->spuAddr==0) pFO->spuAddr=0xbaadf00d;
@@ -284,7 +284,7 @@ long CALLBACK SPUfreeze(uint32_t ulFreezeMode, SPUFreeze_t * pF,
  spu.bMemDirty = 1;
 
  if(pF->xaS.nsamples<=4032)                            // start xa again
-  SPUplayADPCMchannel(&pF->xaS);
+  SPUplayADPCMchannel(&pF->xaS, spu.cycles_played, 0);
 
  spu.xapGlobal=0;
 
@@ -334,14 +334,14 @@ void LoadStateV5(SPUFreeze_t * pF)
  spu.decode_pos = pFO->decode_pos & 0x1ff;
 
  spu.dwNewChannel=0;
- spu.dwChannelOn=0;
+ spu.dwChannelsAudible=0;
  spu.dwChannelDead=0;
  for(i=0;i<MAXCHAN;i++)
   {
    load_channel(&spu.s_chan[i],&pFO->s_chan[i],i);
 
-   spu.s_chan[i].pCurr+=(unsigned long)spu.spuMemC;
-   spu.s_chan[i].pLoop+=(unsigned long)spu.spuMemC;
+   spu.s_chan[i].pCurr+=(uintptr_t)spu.spuMemC;
+   spu.s_chan[i].pLoop+=(uintptr_t)spu.spuMemC;
   }
 }
 
@@ -357,7 +357,7 @@ void LoadStateUnknown(SPUFreeze_t * pF, uint32_t cycles)
   }
 
  spu.dwNewChannel=0;
- spu.dwChannelOn=0;
+ spu.dwChannelsAudible=0;
  spu.dwChannelDead=0;
  spu.pSpuIrq=spu.spuMemC;
 

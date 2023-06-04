@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013-2019  Free Software Foundation, Inc.
+ * Copyright (C) 2013-2022  Free Software Foundation, Inc.
  *
  * This file is part of GNU lightning.
  *
@@ -966,6 +966,18 @@ static void _movr(jit_state_t*,jit_int32_t,jit_int32_t);
 static void _movi(jit_state_t*,jit_int32_t,jit_word_t);
 #  define movi_p(r0,i0)			_movi_p(_jit,r0,i0)
 static jit_word_t _movi_p(jit_state_t*,jit_int32_t,jit_word_t);
+#  define bswapr_us(r0, r1)		generic_bswapr_us(_jit, r0, r1)
+#  define bswapr_ui(r0, r1)		generic_bswapr_ui(_jit, r0, r1)
+#  define bswapr_ul(r0, r1)		generic_bswapr_ul(_jit, r0, r1)
+#  define movnr(r0,r1,r2)		_movnr(_jit,r0,r1,r2)
+static void _movnr(jit_state_t*,jit_int32_t,jit_int32_t,jit_int32_t);
+#  define movzr(r0,r1,r2)		_movzr(_jit,r0,r1,r2)
+static void _movzr(jit_state_t*,jit_int32_t,jit_int32_t,jit_int32_t);
+#  define casx(r0, r1, r2, r3, i0)	_casx(_jit, r0, r1, r2, r3, i0)
+static void _casx(jit_state_t *_jit,jit_int32_t,jit_int32_t,
+		  jit_int32_t,jit_int32_t,jit_word_t);
+#define casr(r0, r1, r2, r3)		casx(r0, r1, r2, r3, 0)
+#define casi(r0, i0, r1, r2)		casx(r0, _NOREG, r1, r2, i0)
 #  define addr(r0,r1,r2)		_addr(_jit,r0,r1,r2)
 static void _addr(jit_state_t*,jit_int32_t,jit_int32_t,jit_int32_t);
 #  define addi(r0,r1,i0)		_addi(_jit,r0,r1,i0)
@@ -1079,13 +1091,6 @@ static void _ori(jit_state_t*,jit_int32_t,jit_int32_t,jit_word_t);
 static void _xorr(jit_state_t*,jit_int32_t,jit_int32_t,jit_int32_t);
 #  define xori(r0,r1,i0)		_xori(_jit,r0,r1,i0)
 static void _xori(jit_state_t*,jit_int32_t,jit_int32_t,jit_word_t);
-#  define htonr_us(r0,r1)		extr_us(r0,r1)
-#  if __WORDSIZE == 32
-#    define htonr_ui(r0,r1)		movr(r0,r1)
-#  else
-#    define htonr_ui(r0,r1)		extr_ui(r0,r1)
-#    define htonr_ul(r0,r1)		movr(r0,r1)
-#  endif
 #  define extr_c(r0,r1)			LGBR(r0,r1)
 #  define extr_uc(r0,r1)		LLGCR(r0,r1)
 #  define extr_s(r0,r1)			LGHR(r0,r1)
@@ -2440,6 +2445,65 @@ _movi_p(jit_state_t *_jit, jit_int32_t r0, jit_word_t i0)
     IIHH(r0, x16((jit_uword_t)i0 >> 48));
 #endif
     return (w);
+}
+
+static void
+_movnr(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1, jit_int32_t r2)
+{
+    jit_word_t	w;
+    w = beqi_p(_jit->pc.w, r2, 0);
+#if __WORDSIZE == 32
+    LR(r0, r1);
+#else
+    LGR(r0, r1);
+#endif
+    patch_at(w, _jit->pc.w);
+}
+
+static void
+_movzr(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1, jit_int32_t r2)
+{
+    jit_word_t	w;
+    w = bnei_p(_jit->pc.w, r2, 0);
+#if __WORDSIZE == 32
+    LR(r0, r1);
+#else
+    LGR(r0, r1);
+#endif
+    patch_at(w, _jit->pc.w);
+}
+
+static void
+_casx(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1,
+      jit_int32_t r2, jit_int32_t r3, jit_word_t i0)
+{
+    jit_int32_t         iscasi, r1_reg;
+    if ((iscasi = (r1 == _NOREG))) {
+        r1_reg = jit_get_reg_but_zero(0);
+        r1 = rn(r1_reg);
+        movi(r1, i0);
+    }
+    /* Do not clobber r2 */
+    movr(r0, r2);
+    /*  The CS and CSG instructions below effectively do atomically:
+     * if (*r1 == r0)
+     *     *r1 = r3;
+     * else
+     *     r0 = *r1
+     * So, we do not need to check cpu flags to know if it did work,
+     * just compare if values are different.
+     * Obviously it is somewhat of undefined behavior if old_value (r2)
+     * and new_value (r3) have the same value, but should still work
+     * as expected as a noop.
+     */
+#  if __WORDSIZE == 32
+    CS(r0, r3, 0, r1);
+#  else
+    CSG(r0, r3, 0, r1);
+#  endif
+    eqr(r0, r0, r2);
+    if (iscasi)
+        jit_unget_reg(r1_reg);
 }
 
 static void

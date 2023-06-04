@@ -313,6 +313,7 @@ static void pl_vout_flip(const void *vram, int stride, int bgr24, int w, int h)
 	unsigned char *dest = pl_vout_buf;
 	const unsigned short *src = vram;
 	int dstride = pl_vout_w, h1 = h;
+	int h_full = pl_vout_h - pl_vout_yoffset;
 	int doffs;
 
 	pcnt_start(PCNT_BLIT);
@@ -323,7 +324,7 @@ static void pl_vout_flip(const void *vram, int stride, int bgr24, int w, int h)
 			pl_plat_clear();
 		else
 			memset(pl_vout_buf, 0,
-				dstride * pl_vout_h * pl_vout_bpp / 8);
+				dstride * h_full * pl_vout_bpp / 8);
 		goto out_hud;
 	}
 
@@ -339,7 +340,7 @@ static void pl_vout_flip(const void *vram, int stride, int bgr24, int w, int h)
 			pl_plat_clear();
 		else
 			memset(pl_vout_buf, 0,
-				dstride * pl_vout_h * pl_vout_bpp / 8);
+				dstride * h_full * pl_vout_bpp / 8);
 		clear_counter--;
 	}
 
@@ -473,7 +474,7 @@ static int dispmode_default(void)
 	return 1;
 }
 
-#ifdef __ARM_NEON__
+#ifdef BUILTIN_GPU_NEON
 static int dispmode_doubleres(void)
 {
 	if (!(pl_rearmed_cbs.gpu_caps & GPU_CAP_SUPPORTS_2X)
@@ -485,7 +486,9 @@ static int dispmode_doubleres(void)
 	snprintf(hud_msg, sizeof(hud_msg), "double resolution");
 	return 1;
 }
+#endif
 
+#ifdef __ARM_NEON__
 static int dispmode_scale2x(void)
 {
 	if (!resolution_ok(psx_w * 2, psx_h * 2) || psx_bpp != 16)
@@ -511,8 +514,10 @@ static int dispmode_eagle2x(void)
 
 static int (*dispmode_switchers[])(void) = {
 	dispmode_default,
-#ifdef __ARM_NEON__
+#ifdef BUILTIN_GPU_NEON
 	dispmode_doubleres,
+#endif
+#ifdef __ARM_NEON__
 	dispmode_scale2x,
 	dispmode_eagle2x,
 #endif
@@ -595,7 +600,6 @@ static void update_analogs(void)
 		}
 
 	}
-	//printf("%4d %4d %4d %4d\n", in_a1[0], in_a1[1], in_a2[0], in_a2[1]);
 }
 
 static void update_input(void)

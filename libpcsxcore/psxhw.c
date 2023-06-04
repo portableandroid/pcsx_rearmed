@@ -30,15 +30,12 @@
 //#define PSXHW_LOG printf
 
 void psxHwReset() {
-	if (Config.Sio) psxHu32ref(0x1070) |= SWAP32(0x80);
-	if (Config.SpuIrq) psxHu32ref(0x1070) |= SWAP32(0x200);
-
 	memset(psxH, 0, 0x10000);
 
 	mdecInit(); // initialize mdec decoder
 	cdrReset();
 	psxRcntInit();
-	HW_GPU_STATUS = 0x14802000;
+	HW_GPU_STATUS = SWAP32(0x14802000);
 }
 
 u8 psxHwRead8(u32 add) {
@@ -190,6 +187,10 @@ u16 psxHwRead16(u32 add) {
 		//case 0x1f802030: hard =   //int_2000????
 		//case 0x1f802040: hard =//dip switches...??
 
+		case 0x1f801800:
+		case 0x1f801802:
+			log_unhandled("cdrom r16 %x\n", add);
+			// falthrough
 		default:
 			if (add >= 0x1f801c00 && add < 0x1f801e00) {
             	hard = SPU_readRegister(add);
@@ -248,8 +249,8 @@ u32 psxHwRead32(u32 add) {
 			return hard;
 		case 0x1f801814:
 			gpuSyncPluginSR();
-			hard = HW_GPU_STATUS;
-			if (hSyncCount < 240 && (HW_GPU_STATUS & PSXGPU_ILACE_BITS) != PSXGPU_ILACE_BITS)
+			hard = SWAP32(HW_GPU_STATUS);
+			if (hSyncCount < 240 && (hard & PSXGPU_ILACE_BITS) != PSXGPU_ILACE_BITS)
 				hard |= PSXGPU_LCF & (psxRegs.cycle << 20);
 #ifdef PSXHW_LOG
 			PSXHW_LOG("GPU STATUS 32bit read %x\n", hard);
@@ -348,6 +349,9 @@ u32 psxHwRead32(u32 add) {
 #endif
 			return hard;
 
+		case 0x1f801800:
+			log_unhandled("cdrom r32 %x\n", add);
+			// falthrough
 		default:
 			hard = psxHu32(add); 
 #ifdef PSXHW_LOG
@@ -436,8 +440,6 @@ void psxHwWrite16(u32 add, u16 value) {
 #ifdef PSXHW_LOG
 			PSXHW_LOG("IREG 16bit write %x\n", value);
 #endif
-			if (Config.Sio) psxHu16ref(0x1070) |= SWAPu16(0x80);
-			if (Config.SpuIrq) psxHu16ref(0x1070) |= SWAPu16(0x200);
 			psxHu16ref(0x1070) &= SWAPu16(value);
 			return;
 
@@ -446,7 +448,7 @@ void psxHwWrite16(u32 add, u16 value) {
 			PSXHW_LOG("IMASK 16bit write %x\n", value);
 #endif
 			psxHu16ref(0x1074) = SWAPu16(value);
-			if (psxHu16ref(0x1070) & value)
+			if (psxHu16ref(0x1070) & SWAPu16(value))
 				new_dyna_set_event(PSXINT_NEWDRC_CHECK, 1);
 			return;
 
@@ -517,6 +519,8 @@ void psxHwWrite16(u32 add, u16 value) {
 }
 
 #define DmaExec(n) { \
+	if (value & SWAPu32(HW_DMA##n##_CHCR) & 0x01000000) \
+		log_unhandled("dma" #n " %08x -> %08x\n", HW_DMA##n##_CHCR, value); \
 	HW_DMA##n##_CHCR = SWAPu32(value); \
 \
 	if (SWAPu32(HW_DMA##n##_CHCR) & 0x01000000 && SWAPu32(HW_DMA_PCR) & (8 << (n * 4))) { \
@@ -551,8 +555,6 @@ void psxHwWrite32(u32 add, u32 value) {
 #ifdef PSXHW_LOG
 			PSXHW_LOG("IREG 32bit write %x\n", value);
 #endif
-			if (Config.Sio) psxHu32ref(0x1070) |= SWAPu32(0x80);
-			if (Config.SpuIrq) psxHu32ref(0x1070) |= SWAPu32(0x200);
 			psxHu32ref(0x1070) &= SWAPu32(value);
 			return;
 		case 0x1f801074:
@@ -560,7 +562,7 @@ void psxHwWrite32(u32 add, u32 value) {
 			PSXHW_LOG("IMASK 32bit write %x\n", value);
 #endif
 			psxHu32ref(0x1074) = SWAPu32(value);
-			if (psxHu32ref(0x1070) & value)
+			if (psxHu32ref(0x1070) & SWAPu32(value))
 				new_dyna_set_event(PSXINT_NEWDRC_CHECK, 1);
 			return;
 

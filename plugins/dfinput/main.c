@@ -1,5 +1,5 @@
 /*
- * (C) GraÅ¾vydas "notaz" Ignotas, 2011
+ * (C) Gražvydas "notaz" Ignotas, 2011
  *
  * This work is licensed under the terms of any of these licenses
  * (at your option):
@@ -7,13 +7,6 @@
  *  - GNU LGPL, version 2.1 or later.
  * See the COPYING file in the top-level directory.
  */
-
-#ifndef _WIN32
-#define CALLBACK
-#else
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
 
 #include "main.h"
 
@@ -27,7 +20,7 @@ extern unsigned char CALLBACK PAD2__startPoll(int pad);
 extern unsigned char CALLBACK PAD1__poll(unsigned char value);
 extern unsigned char CALLBACK PAD2__poll(unsigned char value);
 
-#ifndef HAVE_LIBRETRO
+#if 0 //ndef HAVE_LIBRETRO
 
 static int old_controller_type1 = -1, old_controller_type2 = -1;
 
@@ -42,11 +35,10 @@ static int old_controller_type1 = -1, old_controller_type2 = -1;
 			pad_init(); \
 			break; \
 		case PSE_PAD_TYPE_GUNCON: \
-			/* Removed for new Guncon functionality, may have been required for very old touchscreen support */ \
-			/* PAD##n##_startPoll = PADstartPoll_guncon; */ \
-			/* PAD##n##_poll = PADpoll_guncon; */ \
-			/* guncon_init(); */ \
-			/* break; */ \
+			PAD##n##_startPoll = PADstartPoll_guncon; \
+			PAD##n##_poll = PADpoll_guncon; \
+			guncon_init(); \
+			break; \
 		case PSE_PAD_TYPE_NEGCON: \
 		case PSE_PAD_TYPE_GUN: \
 		default: \
@@ -55,12 +47,9 @@ static int old_controller_type1 = -1, old_controller_type2 = -1;
 			break; \
 		} \
 	}
-#endif /* HAVE_LIBRETRO */
-
 
 void dfinput_activate(void)
 {
-	#ifndef HAVE_LIBRETRO
 	PadDataS pad;
 
 	pad.portMultitap = -1;
@@ -71,5 +60,12 @@ void dfinput_activate(void)
 	pad.requestPadIndex = 1;
 	PAD2_readPort2(&pad);
 	select_pad(2);
-	#endif
 }
+
+#else // use libretro's libpcsxcore/plugins.c code
+
+void dfinput_activate(void)
+{
+}
+
+#endif

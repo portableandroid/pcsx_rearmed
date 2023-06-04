@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013-2019  Free Software Foundation, Inc.
+ * Copyright (C) 2013-2022  Free Software Foundation, Inc.
  *
  * This file is part of GNU lightning.
  *
@@ -52,6 +52,7 @@ extern void __clear_cache(void *, void *);
 #define PROTO				1
 #  include "jit_ia64-cpu.c"
 #  include "jit_ia64-fpu.c"
+#  include "jit_fallback.c"
 #undef PROTO
 
 /*
@@ -1116,9 +1117,10 @@ _emit_code(jit_state_t *_jit)
 	jit_regarg_set(node, value);
 	switch (node->code) {
 	    case jit_code_align:
-		assert(!(node->u.w & (node->u.w - 1)) &&
-		       node->u.w <= sizeof(jit_word_t));
-		/* nothing done */
+		assert(!(node->u.w & (node->u.w - 1)));
+		sync();
+		if (node->u.w > 8)
+		    nop(node->u.w - 8);
 		break;
 	    case jit_code_note:		case jit_code_name:
 		sync();
@@ -1175,6 +1177,16 @@ _emit_code(jit_state_t *_jit)
 		case_rrw(rsh, _u);
 		case_rr(neg,);
 		case_rr(com,);
+	    case jit_code_casr:
+		casr(rn(node->u.w), rn(node->v.w),
+		     rn(node->w.q.l), rn(node->w.q.h));
+		break;
+	    case jit_code_casi:
+		casi(rn(node->u.w), node->v.w,
+		     rn(node->w.q.l), rn(node->w.q.h));
+		break;
+		case_rrr(movn,);
+		case_rrr(movz,);
 		case_rr(mov,);
 	    case jit_code_movi:
 		if (node->flag & jit_flag_node) {
@@ -1196,6 +1208,9 @@ _emit_code(jit_state_t *_jit)
 		case_rr(hton, _us);
 		case_rr(hton, _ui);
 		case_rr(hton, _ul);
+		case_rr(bswap, _us);
+		case_rr(bswap, _ui);
+		case_rr(bswap, _ul);
 		case_rr(ext, _c);
 		case_rr(ext, _uc);
 		case_rr(ext, _s);
@@ -1688,6 +1703,7 @@ _emit_code(jit_state_t *_jit)
 #define CODE				1
 #  include "jit_ia64-cpu.c"
 #  include "jit_ia64-fpu.c"
+#  include "jit_fallback.c"
 #undef CODE
 
 void

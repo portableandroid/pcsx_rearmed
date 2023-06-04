@@ -24,12 +24,8 @@
 ////////////////////////////////////////////////////////////////////////
 
 unsigned char  *psxVub;
-signed   char  *psxVsb;
 unsigned short *psxVuw;
 unsigned short *psxVuw_eom;
-signed   short *psxVsw;
-uint32_t *psxVul;
-int32_t  *psxVsl;
 
 ////////////////////////////////////////////////////////////////////////
 // GPU globals
@@ -96,12 +92,7 @@ long CALLBACK GPUinit(void)                                // GPU INIT
  //!!! ATTENTION !!!
  psxVub=vram + 512 * 1024;                           // security offset into double sized psx vram!
 
- psxVsb=(signed char *)psxVub;                         // different ways of accessing PSX VRAM
- psxVsw=(signed short *)psxVub;
- psxVsl=(int32_t *)psxVub;
  psxVuw=(unsigned short *)psxVub;
- psxVul=(uint32_t *)psxVub;
-
  psxVuw_eom=psxVuw+1024*512;                    // pre-calc of end of vram
 
  memset(vram,0x00,(512*2)*1024 + (1024*1024));
@@ -985,7 +976,7 @@ ENDVRAM:
          if((gpuDataC==254 && gpuDataP>=3) ||
             (gpuDataC==255 && gpuDataP>=4 && !(gpuDataP&1)))
           {
-           if((gpuDataM[gpuDataP] & 0xF000F000) == 0x50005000)
+           if((gpuDataM[gpuDataP] & HOST2LE32(0xF000F000)) == HOST2LE32(0x50005000))
             gpuDataP=gpuDataC-1;
           }
         }
@@ -1060,8 +1051,8 @@ long CALLBACK GPUdmaChain(uint32_t * baseAddrL, uint32_t addr)
    if(count>0) GPUwriteDataMem(&baseAddrL[dmaMem>>2],count);
 
    addr = GETLE32(&baseAddrL[addr>>2])&0xffffff;
-  }
- while (addr != 0xffffff);
+   } while (!(addr & 0x800000)); // contrary to some documentation, the end-of-linked-list marker is not actually 0xFF'FFFF
+                                  // any pointer with bit 23 set will do.
 
  GPUIsIdle;
 

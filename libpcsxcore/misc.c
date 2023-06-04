@@ -28,6 +28,7 @@
 #include "gpu.h"
 #include "ppf.h"
 #include "database.h"
+#include "lightrec/plugin.h"
 #include <zlib.h>
 
 #ifdef PORTANDROID
@@ -60,17 +61,11 @@ struct iso_directory_record {
 	char name			[1];
 };
 
-void mmssdd( char *b, char *p )
+static void mmssdd( char *b, char *p )
 {
 	int m, s, d;
-#if defined(__arm__)
-	unsigned char *u = (void *)b;
-	int block = (u[3] << 24) | (u[2] << 16) | (u[1] << 8) | u[0];
-#elif defined(__BIGENDIAN__)
-	int block = (b[0] & 0xff) | ((b[1] & 0xff) << 8) | ((b[2] & 0xff) << 16) | (b[3] << 24);
-#else
-	int block = *((int*)b);
-#endif
+	unsigned char *ub = (void *)b;
+	int block = (ub[3] << 24) | (ub[2] << 16) | (ub[1] << 8) | ub[0];
 
 	block += 150;
 	m = block / 4500;			// minutes
@@ -101,7 +96,7 @@ void mmssdd( char *b, char *p )
 	time[0] = itob(time[0]); time[1] = itob(time[1]); time[2] = itob(time[2]);
 
 #define READTRACK() \
-	if (CDR_readTrack(time) == -1) return -1; \
+	if (!CDR_readTrack(time)) return -1; \
 	buf = (void *)CDR_getBuffer(); \
 	if (buf == NULL) return -1; \
 	else CheckPPFCache((u8 *)buf, time[0], time[1], time[2]);
@@ -259,7 +254,7 @@ int LoadCdrom() {
 		incTime();
 		READTRACK();
 
-		if (ptr != NULL) memcpy(ptr, buf+12, 2048);
+		if (ptr != INVALID_PTR) memcpy(ptr, buf+12, 2048);
 
 		tmpHead.t_size -= 2048;
 		tmpHead.t_addr += 2048;
@@ -305,7 +300,7 @@ int LoadCdromFile(const char *filename, EXE_HEADER *head) {
 		READTRACK();
 
 		mem = PSXM(addr);
-		if (mem)
+		if (mem != INVALID_PTR)
 			memcpy(mem, buf + 12, 2048);
 
 		size -= 2048;
@@ -432,7 +427,7 @@ static int PSXGetFileType(FILE *f) {
 
 	current = ftell(f);
 	fseek(f, 0L, SEEK_SET);
-	if (fread(&mybuf, sizeof(mybuf), 1, f) != sizeof(mybuf))
+	if (fread(&mybuf, 1, sizeof(mybuf), f) != sizeof(mybuf))
 		goto io_fail;
 	
 	fseek(f, current, SEEK_SET);
@@ -493,12 +488,12 @@ int Load(const char *ExePath) {
 		type = PSXGetFileType(tmpFile);
 		switch (type) {
 			case PSX_EXE:
-				if (fread(&tmpHead, sizeof(EXE_HEADER), 1, tmpFile) != sizeof(EXE_HEADER))
+				if (fread(&tmpHead, 1, sizeof(EXE_HEADER), tmpFile) != sizeof(EXE_HEADER))
 					goto fail_io;
 				section_address = SWAP32(tmpHead.t_addr);
 				section_size = SWAP32(tmpHead.t_size);
 				mem = PSXM(section_address);
-				if (mem != NULL) {
+				if (mem != INVALID_PTR) {
 					fseek(tmpFile, 0x800, SEEK_SET);
 					fread_to_ram(mem, section_size, 1, tmpFile);
 					psxCpu->Clear(section_address, section_size / 4);
@@ -513,13 +508,13 @@ int Load(const char *ExePath) {
 			case CPE_EXE:
 				fseek(tmpFile, 6, SEEK_SET); /* Something tells me we should go to 4 and read the "08 00" here... */
 				do {
-					if (fread(&opcode, sizeof(opcode), 1, tmpFile) != sizeof(opcode))
+					if (fread(&opcode, 1, sizeof(opcode), tmpFile) != sizeof(opcode))
 						goto fail_io;
 					switch (opcode) {
 						case 1: /* Section loading */
-							if (fread(&section_address, sizeof(section_address), 1, tmpFile) != sizeof(section_address))
+							if (fread(&section_address, 1, sizeof(section_address), tmpFile) != sizeof(section_address))
 								goto fail_io;
-							if (fread(&section_size, sizeof(section_size), 1, tmpFile) != sizeof(section_size))
+							if (fread(&section_size, 1, sizeof(section_size), tmpFile) != sizeof(section_size))
 								goto fail_io;
 							section_address = SWAPu32(section_address);
 							section_size = SWAPu32(section_size);
@@ -527,14 +522,14 @@ int Load(const char *ExePath) {
 							EMU_LOG("Loading %08X bytes from %08X to %08X\n", section_size, ftell(tmpFile), section_address);
 #endif
 							mem = PSXM(section_address);
-							if (mem != NULL) {
+							if (mem != INVALID_PTR) {
 								fread_to_ram(mem, section_size, 1, tmpFile);
 								psxCpu->Clear(section_address, section_size / 4);
 							}
 							break;
 						case 3: /* register loading (PC only?) */
 							fseek(tmpFile, 2, SEEK_CUR); /* unknown field */
-							if (fread(&psxRegs.pc, sizeof(psxRegs.pc), 1, tmpFile) != sizeof(psxRegs.pc))
+							if (fread(&psxRegs.pc, 1, sizeof(psxRegs.pc), tmpFile) != sizeof(psxRegs.pc))
 								goto fail_io;
 							psxRegs.pc = SWAPu32(psxRegs.pc);
 							break;
@@ -564,7 +559,8 @@ int Load(const char *ExePath) {
 		CdromLabel[0] = '\0';
 	}
 
-	fclose(tmpFile);
+	if (tmpFile)
+		fclose(tmpFile);
 	return retval;
 
 fail_io:
@@ -623,6 +619,9 @@ int SaveState(const char *file) {
 	if (f == NULL) return -1;
 
 	new_dyna_before_save();
+
+	if (drc_is_lightrec() && Config.Cpu != CPU_INTERPRETER)
+		lightrec_plugin_sync_regs_to_pcsx();
 
 	SaveFuncs.write(f, (void *)PcsxHeader, 32);
 	SaveFuncs.write(f, (void *)&SaveVersion, sizeof(u32));
@@ -699,12 +698,8 @@ int LoadState(const char *file) {
 	if (Config.HLE)
 		psxBiosInit();
 
-#if defined(LIGHTREC)
-	if (Config.Cpu != CPU_INTERPRETER)
-		psxCpu->Clear(0, UINT32_MAX); //clear all
-	else
-#endif
-	psxCpu->Reset();
+	if (!drc_is_lightrec() || Config.Cpu == CPU_INTERPRETER)
+		psxCpu->Reset();
 	SaveFuncs.seek(f, 128 * 96 * 3, SEEK_CUR);
 
 	SaveFuncs.read(f, psxM, 0x00200000);
@@ -712,6 +707,9 @@ int LoadState(const char *file) {
 	SaveFuncs.read(f, psxH, 0x00010000);
 	SaveFuncs.read(f, &psxRegs, offsetof(psxRegisters, gteBusyCycle));
 	psxRegs.gteBusyCycle = psxRegs.cycle;
+
+	if (drc_is_lightrec() && Config.Cpu != CPU_INTERPRETER)
+		lightrec_plugin_sync_regs_from_pcsx();
 
 	if (Config.HLE)
 		psxBiosFreeze(0);
@@ -722,7 +720,7 @@ int LoadState(const char *file) {
 	GPU_freeze(0, gpufP);
 	free(gpufP);
 	if (HW_GPU_STATUS == 0)
-		HW_GPU_STATUS = GPU_readStatus();
+		HW_GPU_STATUS = SWAP32(GPU_readStatus());
 
 	// spu
 	SaveFuncs.read(f, &Size, 4);
@@ -770,10 +768,13 @@ int SendPcsxInfo() {
 	if (NET_recvData == NULL || NET_sendData == NULL)
 		return 0;
 
+	boolean Sio_old = 0;
+	boolean SpuIrq_old = 0;
+	boolean RCntFix_old = 0;
 	NET_sendData(&Config.Xa, sizeof(Config.Xa), PSE_NET_BLOCKING);
-	NET_sendData(&Config.Sio, sizeof(Config.Sio), PSE_NET_BLOCKING);
-	NET_sendData(&Config.SpuIrq, sizeof(Config.SpuIrq), PSE_NET_BLOCKING);
-	NET_sendData(&Config.RCntFix, sizeof(Config.RCntFix), PSE_NET_BLOCKING);
+	NET_sendData(&Sio_old, sizeof(Sio_old), PSE_NET_BLOCKING);
+	NET_sendData(&SpuIrq_old, sizeof(SpuIrq_old), PSE_NET_BLOCKING);
+	NET_sendData(&RCntFix_old, sizeof(RCntFix_old), PSE_NET_BLOCKING);
 	NET_sendData(&Config.PsxType, sizeof(Config.PsxType), PSE_NET_BLOCKING);
 	NET_sendData(&Config.Cpu, sizeof(Config.Cpu), PSE_NET_BLOCKING);
 
@@ -786,10 +787,13 @@ int RecvPcsxInfo() {
 	if (NET_recvData == NULL || NET_sendData == NULL)
 		return 0;
 
+	boolean Sio_old = 0;
+	boolean SpuIrq_old = 0;
+	boolean RCntFix_old = 0;
 	NET_recvData(&Config.Xa, sizeof(Config.Xa), PSE_NET_BLOCKING);
-	NET_recvData(&Config.Sio, sizeof(Config.Sio), PSE_NET_BLOCKING);
-	NET_recvData(&Config.SpuIrq, sizeof(Config.SpuIrq), PSE_NET_BLOCKING);
-	NET_recvData(&Config.RCntFix, sizeof(Config.RCntFix), PSE_NET_BLOCKING);
+	NET_recvData(&Sio_old, sizeof(Sio_old), PSE_NET_BLOCKING);
+	NET_recvData(&SpuIrq_old, sizeof(SpuIrq_old), PSE_NET_BLOCKING);
+	NET_recvData(&RCntFix_old, sizeof(RCntFix_old), PSE_NET_BLOCKING);
 	NET_recvData(&Config.PsxType, sizeof(Config.PsxType), PSE_NET_BLOCKING);
 
 	SysUpdate();

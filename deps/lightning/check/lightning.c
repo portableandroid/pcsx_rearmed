@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012-2019  Free Software Foundation, Inc.
+ * Copyright (C) 2012-2022  Free Software Foundation, Inc.
  *
  * This file is part of GNU lightning.
  *
@@ -30,6 +30,7 @@
 #include <stdarg.h>
 #include <lightning.h>
 #include <dlfcn.h>
+#include <math.h>
 
 #if defined(__linux__) && (defined(__i386__) || defined(__x86_64__))
 #  include <fpu_control.h>
@@ -315,6 +316,7 @@ static void ger_u(void);	static void gei_u(void);
 static void gtr(void);		static void gti(void);
 static void gtr_u(void);	static void gti_u(void);
 static void ner(void);		static void nei(void);
+static void casr(void);		static void casi(void);
 static void movr(void);		static void movi(void);
 static void extr_c(void);	static void extr_uc(void);
 static void extr_s(void);	static void extr_us(void);
@@ -327,6 +329,12 @@ static void htonr_ui(void);	static void ntohr_ui(void);
 static void htonr_ul(void);	static void ntohr_ul(void);
 #endif
 static void htonr(void);	static void ntohr(void);
+static void bswapr_us(void);	static void bswapr_ui(void);
+#if __WORDSIZE == 64
+static void bswapr_ul(void);
+#endif
+static void bswapr(void);
+static void movnr(void);	static void movzr(void);
 static void ldr_c(void);	static void ldi_c(void);
 static void ldr_uc(void);	static void ldi_uc(void);
 static void ldr_s(void);	static void ldi_s(void);
@@ -629,6 +637,7 @@ static instr_t		  instr_vector[] = {
     entry(gtr),		entry(gti),
     entry(gtr_u),	entry(gti_u),
     entry(ner),		entry(nei),
+    entry(casr),	entry(casi),
     entry(movr),	entry(movi),
     entry(extr_c),	entry(extr_uc),
     entry(extr_s),	entry(extr_us),
@@ -641,6 +650,12 @@ static instr_t		  instr_vector[] = {
     entry(htonr_ul),	entry(ntohr_ul),
 #endif
     entry(htonr),	entry(ntohr),
+    entry(bswapr_us),	entry(bswapr_ui),
+#if __WORDSIZE == 64
+    entry(bswapr_ul),
+#endif
+    entry(bswapr),
+    entry(movnr),	entry(movzr),
     entry(ldr_c),	entry(ldi_c),
     entry(ldr_uc), 	entry(ldi_uc),
     entry(ldr_s),	entry(ldi_s),
@@ -1015,6 +1030,16 @@ name(void)								\
     jit_word_t	im = get_imm();						\
     jit_##name(r0, r1, r2, im);						\
 }
+#define entry_ir_im_ir_ir(name)						\
+static void								\
+name(void)								\
+{									\
+    jit_gpr_t	r0 = get_ireg();					\
+    jit_word_t	im = get_imm();						\
+    jit_gpr_t r1 = get_ireg(), r2 = get_ireg();				\
+    jit_##name(r0, im, r1, r2);						\
+}
+
 #define entry_ir_ir(name)						\
 static void								\
 name(void)								\
@@ -1430,6 +1455,7 @@ entry_ir_ir_ir(ger_u)		entry_ir_ir_im(gei_u)
 entry_ir_ir_ir(gtr)		entry_ir_ir_im(gti)
 entry_ir_ir_ir(gtr_u)		entry_ir_ir_im(gti_u)
 entry_ir_ir_ir(ner)		entry_ir_ir_im(nei)
+entry_ir_ir_ir_ir(casr)		entry_ir_im_ir_ir(casi)
 entry_ir_ir(movr)
 static void
 movi(void)
@@ -1489,6 +1515,12 @@ entry_ir_ir(htonr_ui)		entry_ir_ir(ntohr_ui)
 entry_ir_ir(htonr_ul)		entry_ir_ir(ntohr_ul)
 #endif
 entry_ir_ir(htonr)		entry_ir_ir(ntohr)
+entry_ir_ir(bswapr_us)		entry_ir_ir(bswapr_ui)
+#if __WORDSIZE == 64
+entry_ir_ir(bswapr_ul)
+#endif
+entry_ir_ir(bswapr)
+entry_ir_ir_ir(movnr)		entry_ir_ir_ir(movzr)
 entry_ir_ir(ldr_c)		entry_ir_pm(ldi_c)
 entry_ir_ir(ldr_uc)		entry_ir_pm(ldi_uc)
 entry_ir_ir(ldr_s)		entry_ir_pm(ldi_s)
@@ -3797,6 +3829,11 @@ execute(int argc, char *argv[])
 	jit_disassemble();
 	fprintf(stderr, "  - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -\n");
     }
+    if (flag_verbose && argc) {
+	for (result = 0; result < argc; result++)
+	    printf("argv[%d] = %s\n", result, argv[result]);
+	fprintf(stderr, "  - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -\n");
+    }
 
     jit_clear_state();
     if (flag_disasm)
@@ -3996,12 +4033,11 @@ usage(void)
 {
 #if HAVE_GETOPT_LONG_ONLY
     fprintf(stderr, "\
-Usage: %s [jit assembler options] file [jit program options]\n\
+Usage: %s [jit assembler options] file [--] [jit program options]\n\
 Jit assembler options:\n\
   -help                    Display this information\n\
   -v[0-3]                  Verbose output level\n\
-  -d                       Do not use a data buffer\n\
-  -D<macro>[=<val>]        Preprocessor options\n"
+  -d                       Do not use a data buffer\n"
 #  if defined(__i386__) && __WORDSIZE == 32
 "  -mx87=1                  Force using x87 when sse2 available\n"
 #  endif
@@ -4017,11 +4053,10 @@ Jit assembler options:\n\
 	    , progname);
 #else
     fprintf(stderr, "\
-Usage: %s [jit assembler options] file [jit program options]\n\
+Usage: %s [jit assembler options] file [--] [jit program options]\n\
 Jit assembler options:\n\
   -h                       Display this information\n\
-  -v                       Verbose output level\n\
-  -D<macro>[=<val>]        Preprocessor options\n", progname);
+  -v                       Verbose output level\n", progname);
 #endif
     finish_jit();
     exit(1);
@@ -4196,16 +4231,6 @@ main(int argc, char *argv[])
 #  define cc "gcc"
 #endif
     opt_short = snprintf(cmdline, sizeof(cmdline), cc " -E -x c %s", argv[opt_index]);
-    for (++opt_index; opt_index < argc; opt_index++) {
-	if (argv[opt_index][0] == '-')
-	    opt_short += snprintf(cmdline + opt_short,
-				  sizeof(cmdline) - opt_short,
-				  " %s", argv[opt_index]);
-	else {
-	    --opt_index;
-	    break;
-	}
-    }
     opt_short += snprintf(cmdline + opt_short,
 			  sizeof(cmdline) - opt_short,
 			  " -D__WORDSIZE=%d", __WORDSIZE);
@@ -4282,6 +4307,11 @@ main(int argc, char *argv[])
     opt_short += snprintf(cmdline + opt_short,
 			  sizeof(cmdline) - opt_short,
 			  " -D__alpha__=1");
+#endif
+#if defined(__loongarch__)
+    opt_short += snprintf(cmdline + opt_short,
+			  sizeof(cmdline) - opt_short,
+			  " -D__loongarch__=1");
 #endif
     if ((parser.fp = popen(cmdline, "r")) == NULL)
 	error("cannot execute %s", cmdline);

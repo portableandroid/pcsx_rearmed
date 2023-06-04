@@ -12,17 +12,14 @@
 #include <string.h>
 #include <stdlib.h>
 #include <zlib.h>
-#ifndef _WIN32
-#define CALLBACK
-#ifndef NO_DYLIB
+#if !defined(_WIN32) && !defined(NO_DYLIB)
 #include <dlfcn.h>
-#endif
-#else
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 #endif
 
 #include "cdrcimg.h"
+
+#undef CALLBACK
+#define CALLBACK
 
 #define PFX "cdrcimg: "
 #define err(f, ...) fprintf(stderr, PFX f, ##__VA_ARGS__)
@@ -416,8 +413,6 @@ static long CDRopen(void)
 	int i, ret;
 	char *ext;
 	FILE *f = NULL;
-
-	printf("%s cd_file=%d\n", __func__, cd_file == NULL ? 0 : 1);
 
 	if (cd_file != NULL)
 		return 0; // it's already open

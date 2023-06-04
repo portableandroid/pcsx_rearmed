@@ -371,8 +371,8 @@ extern int in_type[8];
 void *hPAD1Driver = NULL;
 void *hPAD2Driver = NULL;
 
-static int multitap1 = -1;
-static int multitap2 = -1;
+static int multitap1;
+static int multitap2;
 //Pad information, keystate, mode, config mode, vibration
 static PadDataS pad[8];
 
@@ -650,7 +650,7 @@ void _PADstartPoll(PadDataS *pad) {
 			memcpy(buf, stdpar, 8);
 			respSize = 8;
 			break;
-	case PSE_PAD_TYPE_GUNCON: // GUNCON - gun controller SLPH-00034 from Namco
+		case PSE_PAD_TYPE_GUNCON: // GUNCON - gun controller SLPH-00034 from Namco
 			stdpar[0] = 0x63;
 			stdpar[1] = 0x5a;
 			stdpar[2] = pad->buttonStatus & 0xff;
@@ -776,9 +776,8 @@ unsigned char _PADpoll(int port, unsigned char value) {
 	}
 
 	//if no new request the pad return 0xff, for signaling connected
-	if (reqPos >= respSize
-	 && writeok
-	 ) return 0xff;
+	if (reqPos >= respSize)
+		return 0xff;
 
 	switch(reqPos){
 		case 2:
@@ -793,8 +792,7 @@ unsigned char _PADpoll(int port, unsigned char value) {
 				//mem the vibration value for Large motor;
 				pad[port].Vib[1] = value;
 
-				if (in_type[port] == PSE_PAD_TYPE_STANDARD &&
-					in_type[port] == PSE_PAD_TYPE_NEGCON)
+				if (in_type[port] != PSE_PAD_TYPE_ANALOGPAD)
 					break;
 
 				//vibration
@@ -818,12 +816,6 @@ unsigned char _PADpollMultitap(int port, unsigned char value) {
 unsigned char CALLBACK PAD1__startPoll(int pad) {
 	reqPos = 0;
 	// first call the pad provide if a multitap is connected between the psx and himself
-	if (multitap1 == -1) {
-		PadDataS padd;
-		padd.requestPadIndex = 0;
-		PAD1_readPort1(&padd);
-		multitap1 = padd.portMultitap;
-	}
 	// just one pad is on port 1 : NO MULTITAP
 	if (multitap1 == 0) {
 		PadDataS padd;
@@ -874,6 +866,7 @@ long CALLBACK PAD1__keypressed() { return 0; }
 	if (PAD1_##dest == NULL) PAD1_##dest = (PAD##dest) PAD1__##dest;
 
 static int LoadPAD1plugin(const char *PAD1dll) {
+	PadDataS padd;
 	void *drv;
 
 	hPAD1Driver = SysLoadLibrary(PAD1dll);
@@ -896,6 +889,10 @@ static int LoadPAD1plugin(const char *PAD1dll) {
 	LoadPad1Sym0(poll, "PADpoll");
 	LoadPad1SymN(setSensitive, "PADsetSensitive");
 
+	padd.requestPadIndex = 0;
+	PAD1_readPort1(&padd);
+	multitap1 = padd.portMultitap;
+
 	return 0;
 }
 
@@ -909,14 +906,6 @@ unsigned char CALLBACK PAD2__startPoll(int pad) {
 		pad_index = 4;
 	} else {
 		pad_index = 0;
-	}
-
-	//first call the pad provide if a multitap is connected between the psx and himself
-	if (multitap2 == -1) {
-		PadDataS padd;
-		padd.requestPadIndex = pad_index;
-		PAD2_readPort2(&padd);
-		multitap2 = padd.portMultitap;
 	}
 
 	// just one pad is on port 1 : NO MULTITAP
@@ -967,6 +956,7 @@ long CALLBACK PAD2__keypressed() { return 0; }
 	LoadSym(PAD2_##dest, PAD##dest, name, FALSE);
 
 static int LoadPAD2plugin(const char *PAD2dll) {
+	PadDataS padd;
 	void *drv;
 
 	hPAD2Driver = SysLoadLibrary(PAD2dll);
@@ -988,6 +978,10 @@ static int LoadPAD2plugin(const char *PAD2dll) {
 	LoadPad2Sym0(startPoll, "PADstartPoll");
 	LoadPad2Sym0(poll, "PADpoll");
 	LoadPad2SymN(setSensitive, "PADsetSensitive");
+
+	padd.requestPadIndex = 0;
+	PAD2_readPort2(&padd);
+	multitap2 = padd.portMultitap;
 
 	return 0;
 }

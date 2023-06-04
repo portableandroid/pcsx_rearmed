@@ -29,6 +29,14 @@
 #include "arm_features.h"
 #include "revision.h"
 
+#if defined(__has_builtin)
+#define DO_CPU_CHECKS __has_builtin(__builtin_cpu_init)
+#elif defined(__x86_64__) || defined(__i386__)
+#define DO_CPU_CHECKS 1
+#else
+#define DO_CPU_CHECKS 0
+#endif
+
 #ifndef NO_FRONTEND
 #include "libpicofe/input.h"
 #include "libpicofe/plat.h"
@@ -43,8 +51,8 @@ static void check_memcards(void);
 #endif
 
 // don't include debug.h - it breaks ARM build (R1 redefined)
-void StartDebugger();
-void StopDebugger();
+static void StartDebugger() {}
+static void StopDebugger() {}
 
 int ready_to_go, g_emu_want_quit, g_emu_resetting;
 unsigned long gpuDisp;
@@ -121,28 +129,31 @@ static void set_default_paths(void)
 void emu_set_default_config(void)
 {
 	// try to set sane config on which most games work
-	Config.Xa = Config.Cdda = Config.Sio =
-	Config.icache_emulation = Config.SpuIrq = Config.RCntFix = Config.VSyncWA = 0;
+	Config.Xa = Config.Cdda = 0;
+	Config.icache_emulation = 0;
 	Config.PsxAuto = 1;
-
-	pl_rearmed_cbs.thread_rendering = 0;
+	Config.cycle_multiplier = CYCLE_MULT_DEFAULT;
+	Config.GpuListWalking = -1;
 
 	pl_rearmed_cbs.gpu_neon.allow_interlace = 2; // auto
 	pl_rearmed_cbs.gpu_neon.enhancement_enable =
 	pl_rearmed_cbs.gpu_neon.enhancement_no_main = 0;
 	pl_rearmed_cbs.gpu_peops.iUseDither = 0;
 	pl_rearmed_cbs.gpu_peops.dwActFixes = 1<<7;
-	pl_rearmed_cbs.gpu_unai.ilace_force = 0;
-	pl_rearmed_cbs.gpu_unai.pixel_skip = 1;
+#if 0
+	pl_rearmed_cbs.gpu_senquack.ilace_force = 0;
+	pl_rearmed_cbs.gpu_senquack.pixel_skip = 0;
+	pl_rearmed_cbs.gpu_senquack.lighting = 1;
+	pl_rearmed_cbs.gpu_senquack.fast_lighting = 0;
+	pl_rearmed_cbs.gpu_senquack.blending = 1;
+	pl_rearmed_cbs.gpu_senquack.dithering = 0;
+#else
 	pl_rearmed_cbs.gpu_unai.lighting = 1;
-	pl_rearmed_cbs.gpu_unai.fast_lighting = 1;
 	pl_rearmed_cbs.gpu_unai.blending = 1;
-	pl_rearmed_cbs.gpu_unai.dithering = 0;
-	// old gpu_unai config
+#endif
 	pl_rearmed_cbs.gpu_unai.abe_hack =
 	pl_rearmed_cbs.gpu_unai.no_light =
 	pl_rearmed_cbs.gpu_unai.no_blend = 0;
-	pl_rearmed_cbs.gpu_unai.scale_hires = 0;
 	memset(&pl_rearmed_cbs.gpu_peopsgl, 0, sizeof(pl_rearmed_cbs.gpu_peopsgl));
 	pl_rearmed_cbs.gpu_peopsgl.iVRamSize = 64;
 	pl_rearmed_cbs.gpu_peopsgl.iTexGarbageCollection = 1;
@@ -156,10 +167,11 @@ void emu_set_default_config(void)
 #if defined(HAVE_PRE_ARMV7) && !defined(_3DS) /* XXX GPH hack */
 	spu_config.iUseReverb = 0;
 	spu_config.iUseInterpolation = 0;
+#ifndef HAVE_LIBRETRO
 	spu_config.iTempo = 1;
 #endif
+#endif
 	new_dynarec_hacks = 0;
-	cycle_multiplier = 200;
 
 	in_type[0] = PSE_PAD_TYPE_STANDARD;
 	in_type[1] = PSE_PAD_TYPE_STANDARD;
@@ -409,6 +421,24 @@ void emu_on_new_cd(int show_hud_msg)
 	}
 }
 
+static void log_wrong_cpu(void)
+{
+#if DO_CPU_CHECKS
+	__builtin_cpu_init();
+	#define CHECK_CPU(name) if (!__builtin_cpu_supports(name)) \
+		SysPrintf("ERROR: compiled for " name ", which is unsupported by the CPU\n")
+#ifdef __SSE2__
+	CHECK_CPU("sse2");
+#endif
+#ifdef __SSSE3__
+	CHECK_CPU("ssse3");
+#endif
+#ifdef __SSE4_1__
+	CHECK_CPU("sse4.1");
+#endif
+#endif // DO_CPU_CHECKS
+}
+
 int emu_core_preinit(void)
 {
 	// what is the name of the config file?
@@ -422,6 +452,8 @@ int emu_core_preinit(void)
 	if (emuLog == NULL)
 #endif
 	emuLog = stdout;
+
+	log_wrong_cpu();
 
 	SetIsoFile(NULL);
 
@@ -716,7 +748,7 @@ void SysRunGui() {
         printf("SysRunGui\n");
 }
 
-static void dummy_lace()
+static void CALLBACK dummy_lace()
 {
 }
 
@@ -996,7 +1028,7 @@ void *SysLoadLibrary(const char *lib) {
 		tmp++;
 		for (i = 0; i < ARRAY_SIZE(builtin_plugins); i++)
 			if (strcmp(tmp, builtin_plugins[i]) == 0)
-				return (void *)(long)(PLUGIN_DL_BASE + builtin_plugin_ids[i]);
+				return (void *)(uintptr_t)(PLUGIN_DL_BASE + builtin_plugin_ids[i]);
 	}
 
 #if !defined(_WIN32) && !defined(NO_DYLIB)
@@ -1011,7 +1043,7 @@ void *SysLoadLibrary(const char *lib) {
 }
 
 void *SysLoadSym(void *lib, const char *sym) {
-	unsigned int plugid = (unsigned int)(long)lib;
+	unsigned int plugid = (unsigned int)(uintptr_t)lib;
 
 	if (PLUGIN_DL_BASE <= plugid && plugid < PLUGIN_DL_BASE + ARRAY_SIZE(builtin_plugins))
 		return plugin_link(plugid - PLUGIN_DL_BASE, sym);
@@ -1034,7 +1066,7 @@ const char *SysLibError() {
 }
 
 void SysCloseLibrary(void *lib) {
-	unsigned int plugid = (unsigned int)(long)lib;
+	unsigned int plugid = (unsigned int)(uintptr_t)lib;
 
 	if (PLUGIN_DL_BASE <= plugid && plugid < PLUGIN_DL_BASE + ARRAY_SIZE(builtin_plugins))
 		return;

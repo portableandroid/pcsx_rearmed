@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012-2019  Free Software Foundation, Inc.
+ * Copyright (C) 2012-2022  Free Software Foundation, Inc.
  *
  * This file is part of GNU lightning.
  *
@@ -1073,8 +1073,7 @@ _jit_finishr(jit_state_t *_jit, jit_int32_t r0)
     jit_inc_synth_w(finishr, r0);
     if (_jitc->function->self.alen < _jitc->function->call.size)
 	_jitc->function->self.alen = _jitc->function->call.size;
-    jit_movr(_T9, r0);
-    call = jit_callr(_T9);
+    call = jit_callr(r0);
     call->v.w = _jitc->function->self.argi;
 #if NEW_ABI
     call->w.w = call->v.w;
@@ -1300,11 +1299,10 @@ _emit_code(jit_state_t *_jit)
 	jit_regarg_set(node, value);
 	switch (node->code) {
 	    case jit_code_align:
-		assert(!(node->u.w & (node->u.w - 1)) &&
-		       node->u.w <= sizeof(jit_word_t));
-		if (node->u.w == sizeof(jit_word_t) &&
-		    (word = _jit->pc.w & (sizeof(jit_word_t) - 1)))
-		    nop(sizeof(jit_word_t) - word);
+		/* Must align to a power of two */
+		assert(!(node->u.w & (node->u.w - 1)));
+		if ((word = _jit->pc.w & (node->u.w - 1)))
+		    nop(node->u.w - word);
 		break;
 	    case jit_code_note:		case jit_code_name:
 		node->u.w = _jit->pc.w;
@@ -1420,6 +1418,11 @@ _emit_code(jit_state_t *_jit)
 #if __WORDSIZE == 64
 		case_rr(hton, _ul);
 #endif
+		case_rr(bswap, _us);
+		case_rr(bswap, _ui);
+#if __WORDSIZE == 64
+		case_rr(bswap, _ul);
+#endif
 		case_rr(ext, _c);
 		case_rr(ext, _uc);
 		case_rr(ext, _s);
@@ -1428,6 +1431,16 @@ _emit_code(jit_state_t *_jit)
 		case_rr(ext, _i);
 		case_rr(ext, _ui);
 #endif
+	    case jit_code_casr:
+		casr(rn(node->u.w), rn(node->v.w),
+		     rn(node->w.q.l), rn(node->w.q.h));
+		break;
+	    case jit_code_casi:
+		casi(rn(node->u.w), node->v.w,
+		     rn(node->w.q.l), rn(node->w.q.h));
+		break;
+		case_rrr(movn,);
+		case_rrr(movz,);
 		case_rr(mov,);
 	    case jit_code_movi:
 		if (node->flag & jit_flag_node) {

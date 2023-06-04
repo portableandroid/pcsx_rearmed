@@ -112,6 +112,8 @@ extern int Log;
 
 void __Log(char *fmt, ...);
 
+#define CYCLE_MULT_DEFAULT 175
+
 typedef struct {
 	char Gpu[MAXPATHLEN];
 	char Spu[MAXPATHLEN];
@@ -119,7 +121,7 @@ typedef struct {
 	char Pad1[MAXPATHLEN];
 	char Pad2[MAXPATHLEN];
 	char Net[MAXPATHLEN];
-    char Sio1[MAXPATHLEN];
+	char Sio1[MAXPATHLEN];
 	char Mcd1[MAXPATHLEN];
 	char Mcd2[MAXPATHLEN];
 	char Bios[MAXPATHLEN];
@@ -127,7 +129,6 @@ typedef struct {
 	char PluginsDir[MAXPATHLEN];
 	char PatchesDir[MAXPATHLEN];
 	boolean Xa;
-	boolean Sio;
 	boolean Mdec;
 	boolean PsxAuto;
 	boolean Cdda;
@@ -137,14 +138,18 @@ typedef struct {
 	boolean SlowBoot;
 	boolean Debug;
 	boolean PsxOut;
-	boolean SpuIrq;
-	boolean RCntFix;
 	boolean UseNet;
-	boolean VSyncWA;
 	boolean icache_emulation;
 	boolean DisableStalls;
+	int GpuListWalking;
+	int cycle_multiplier; // 100 for 1.0
+	int cycle_multiplier_override;
 	u8 Cpu; // CPU_DYNAREC or CPU_INTERPRETER
 	u8 PsxType; // PSX_TYPE_NTSC or PSX_TYPE_PAL
+	struct {
+		boolean cdr_read_timing;
+		boolean gpu_slow_list_walking;
+	} hacks;
 #ifdef _WIN32
 	char Lang[256];
 #endif
@@ -167,10 +172,6 @@ extern struct PcsxSaveFuncs SaveFuncs;
 	if (Mode == 0) SaveFuncs.read(f, ptr, size); \
 }
 
-// Make the timing events trigger faster as we are currently assuming everything
-// takes one cycle, which is not the case on real hardware.
-// FIXME: Count the proper cycle and get rid of this
-#define BIAS	2
 #define PSXCLK	33868800	/* 33.8688 MHz */
 
 enum {

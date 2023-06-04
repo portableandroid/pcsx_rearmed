@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013-2019  Free Software Foundation, Inc.
+ * Copyright (C) 2013-2022  Free Software Foundation, Inc.
  *
  * This file is part of GNU lightning.
  *
@@ -290,6 +290,7 @@ typedef union {
 #  define A64_CBNZ			0x35000000
 #  define A64_B_C			0x54000000
 #  define A64_CSINC			0x1a800400
+#  define A64_CSSEL			0x1a800000
 #  define A64_REV			0xdac00c00
 #  define A64_UDIV			0x1ac00800
 #  define A64_SDIV			0x1ac00c00
@@ -317,6 +318,8 @@ typedef union {
 #  define A64_LDRSB			0x38e06800
 #  define A64_STR			0xf8206800
 #  define A64_LDR			0xf8606800
+#  define A64_LDAXR			0xc85ffc00
+#  define A64_STLXR			0xc800fc00
 #  define A64_STRH			0x78206800
 #  define A64_LDRH			0x78606800
 #  define A64_LDRSH			0x78a06800
@@ -444,6 +447,8 @@ typedef union {
 #  define LDR(Rt,Rn,Rm)			oxxx(A64_LDR,Rt,Rn,Rm)
 #  define LDRI(Rt,Rn,Imm12)		oxxi(A64_LDRI,Rt,Rn,Imm12)
 #  define LDUR(Rt,Rn,Imm9)		oxx9(A64_LDUR,Rt,Rn,Imm9)
+#  define LDAXR(Rt,Rn)			o_xx(A64_LDAXR,Rt,Rn)
+#  define STLXR(Rs,Rt,Rn)		oxxx(A64_STLXR,Rs,Rn,Rt)
 #  define STRB(Rt,Rn,Rm)		oxxx(A64_STRB,Rt,Rn,Rm)
 #  define STRBI(Rt,Rn,Imm12)		oxxi(A64_STRBI,Rt,Rn,Imm12)
 #  define STURB(Rt,Rn,Imm9)		oxx9(A64_STURB,Rt,Rn,Imm9)
@@ -461,6 +466,7 @@ typedef union {
 #  define LDPI_PRE(Rt,Rt2,Rn,Simm7)	oxxx7(A64_LDP_PRE|XS,Rt,Rt2,Rn,Simm7)
 #  define STPI_POS(Rt,Rt2,Rn,Simm7)	oxxx7(A64_STP_POS|XS,Rt,Rt2,Rn,Simm7)
 #  define CSET(Rd,Cc)			CSINC(Rd,XZR_REGNO,XZR_REGNO,Cc)
+#  define CSEL(Rd,Rn,Rm,Cc)		oxxxc(A64_CSSEL|XS,Rd,Rn,Rm,Cc)
 #  define B(Simm26)			o26(A64_B,Simm26)
 #  define BL(Simm26)			o26(A64_BL,Simm26)
 #  define BR(Rn)			o_x_(A64_BR,Rn)
@@ -572,6 +578,10 @@ static void _rshi(jit_state_t*,jit_int32_t,jit_int32_t,jit_word_t);
 #  define rshr_u(r0,r1,r2)		LSR(r0,r1,r2)
 #  define rshi_u(r0,r1,i0)		_rshi_u(_jit,r0,r1,i0)
 static void _rshi_u(jit_state_t*,jit_int32_t,jit_int32_t,jit_word_t);
+#  define movnr(r0,r1,r2)		_movnr(_jit,r0,r1,r2)
+static void _movnr(jit_state_t*,jit_int32_t,jit_int32_t,jit_int32_t);
+#  define movzr(r0,r1,r2)		_movzr(_jit,r0,r1,r2)
+static void _movzr(jit_state_t*,jit_int32_t,jit_int32_t,jit_int32_t);
 #  define negr(r0,r1)			NEG(r0,r1)
 #  define comr(r0,r1)			MVN(r0,r1)
 #  define andr(r0,r1,r2)		AND(r0,r1,r2)
@@ -657,23 +667,22 @@ static void _stxi_i(jit_state_t*,jit_word_t,jit_int32_t,jit_int32_t);
 #  define stxr_l(r0,r1,r2)		STR(r2,r1,r0)
 #  define stxi_l(i0,r0,r1)		_stxi_l(_jit,i0,r0,r1)
 static void _stxi_l(jit_state_t*,jit_word_t,jit_int32_t,jit_int32_t);
-#  if __BYTE_ORDER == __LITTLE_ENDIAN
-#  define htonr_us(r0,r1)		_htonr_us(_jit,r0,r1)
-static void _htonr_us(jit_state_t*,jit_int32_t,jit_int32_t);
-#  define htonr_ui(r0,r1)		_htonr_ui(_jit,r0,r1)
-static void _htonr_ui(jit_state_t*,jit_int32_t,jit_int32_t);
-#    define htonr_ul(r0,r1)		REV(r0,r1)
-#  else
-#    define htonr_us(r0,r1)		extr_us(r0,r1)
-#    define htonr_ui(r0,r1)		extr_ui(r0,r1)
-#    define htonr_ul(r0,r1)		movr(r0,r1)
-#  endif
+#  define bswapr_us(r0,r1)		_bswapr_us(_jit,r0,r1)
+static void _bswapr_us(jit_state_t*,jit_int32_t,jit_int32_t);
+#  define bswapr_ui(r0,r1)		_bswapr_ui(_jit,r0,r1)
+static void _bswapr_ui(jit_state_t*,jit_int32_t,jit_int32_t);
+#  define bswapr_ul(r0,r1)		REV(r0,r1)
 #  define extr_c(r0,r1)			SXTB(r0,r1)
 #  define extr_uc(r0,r1)		UXTB(r0,r1)
 #  define extr_s(r0,r1)			SXTH(r0,r1)
 #  define extr_us(r0,r1)		UXTH(r0,r1)
 #  define extr_i(r0,r1)			SXTW(r0,r1)
 #  define extr_ui(r0,r1)		UXTW(r0,r1)
+#  define casx(r0, r1, r2, r3, i0)	_casx(_jit, r0, r1, r2, r3, i0)
+static void _casx(jit_state_t *_jit,jit_int32_t,jit_int32_t,
+		  jit_int32_t,jit_int32_t,jit_word_t);
+#define casr(r0, r1, r2, r3)		casx(r0, r1, r2, r3, 0)
+#define casi(r0, i0, r1, r2)		casx(r0, _NOREG, r1, r2, i0)
 #  define movr(r0,r1)			_movr(_jit,r0,r1)
 static void _movr(jit_state_t*,jit_int32_t,jit_int32_t);
 #  define movi(r0,i0)			_movi(_jit,r0,i0)
@@ -1376,6 +1385,20 @@ _rshi_u(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1, jit_word_t i0)
 }
 
 static void
+_movnr(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1, jit_int32_t r2)
+{
+	CMPI(r2, 0);
+	CSEL(r0, r0, r1, CC_NE);
+}
+
+static void
+_movzr(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1, jit_int32_t r2)
+{
+	CMPI(r2, 0);
+	CSEL(r0, r0, r1, CC_EQ);
+}
+
+static void
 _andi(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1, jit_word_t i0)
 {
     jit_int32_t		reg;
@@ -1441,21 +1464,19 @@ _xori(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1, jit_word_t i0)
     }
 }
 
-#if __BYTE_ORDER == __LITTLE_ENDIAN
 static void
-_htonr_us(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
+_bswapr_us(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
 {
-    htonr_ul(r0, r1);
+    bswapr_ul(r0, r1);
     rshi_u(r0, r0, 48);
 }
 
 static void
-_htonr_ui(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
+_bswapr_ui(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1)
 {
-    htonr_ul(r0, r1);
+    bswapr_ul(r0, r1);
     rshi_u(r0, r0, 32);
 }
-#endif
 
 static void
 _ldi_c(jit_state_t *_jit, jit_int32_t r0, jit_word_t i0)
@@ -1812,6 +1833,33 @@ _stxi_l(jit_state_t *_jit, jit_word_t i0, jit_int32_t r0, jit_int32_t r1)
 	str_l(rn(reg), r1);
 	jit_unget_reg(reg);
     }
+}
+
+static void
+_casx(jit_state_t *_jit, jit_int32_t r0, jit_int32_t r1,
+      jit_int32_t r2, jit_int32_t r3, jit_word_t i0)
+{
+    jit_int32_t		r1_reg, iscasi;
+    jit_word_t		retry, done, jump0, jump1;
+    if ((iscasi = (r1 == _NOREG))) {
+	r1_reg = jit_get_reg(jit_class_gpr);
+	r1 = rn(r1_reg);
+	movi(r1, i0);
+    }
+    /* retry: */
+    retry = _jit->pc.w;
+    LDAXR(r0, r1);
+    eqr(r0, r0, r2);
+    jump0 = beqi(_jit->pc.w r0, 0);	/* beqi done r0 0 */
+    STLXR(r3, r0, r1);
+    jump1 = bnei(_jit->pc.w, r0, 0);	/* bnei retry r0 0 */
+    /* done: */
+    CSET(r0, CC_EQ);
+    done = _jit->pc.w;
+    patch_at(jump0, done);
+    patch_at(jump1, retry);
+    if (iscasi)
+	jit_unget_reg(r1_reg);
 }
 
 static void

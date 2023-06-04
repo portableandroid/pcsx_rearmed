@@ -96,6 +96,7 @@ static int config_save_counter, region, in_type_sel1, in_type_sel2;
 static int psx_clock;
 static int memcard1_sel = -1, memcard2_sel = -1;
 extern int g_autostateld_opt;
+static int menu_iopts[8];
 int g_opts, g_scaler, g_gamma = 100;
 int scanlines, scanline_level = 20;
 int soft_scaling, analog_deadzone; // for Caanoo
@@ -305,7 +306,7 @@ static void menu_sync_config(void)
 		Config.PsxAuto = 0;
 		Config.PsxType = region - 1;
 	}
-	cycle_multiplier = 10000 / psx_clock;
+	Config.cycle_multiplier = 10000 / psx_clock;
 
 	switch (in_type_sel1) {
 	case 1:  in_type[0] = PSE_PAD_TYPE_ANALOGPAD; break;
@@ -389,17 +390,14 @@ static const struct {
 	CE_CONFIG_STR(Spu),
 //	CE_CONFIG_STR(Cdr),
 	CE_CONFIG_VAL(Xa),
-//	CE_CONFIG_VAL(Sio),
 	CE_CONFIG_VAL(Mdec),
 	CE_CONFIG_VAL(Cdda),
 	CE_CONFIG_VAL(Debug),
 	CE_CONFIG_VAL(PsxOut),
-	CE_CONFIG_VAL(SpuIrq),
-	CE_CONFIG_VAL(RCntFix),
-	CE_CONFIG_VAL(VSyncWA),
 	CE_CONFIG_VAL(icache_emulation),
 	CE_CONFIG_VAL(DisableStalls),
 	CE_CONFIG_VAL(Cpu),
+	CE_CONFIG_VAL(GpuListWalking),
 	CE_INTVAL(region),
 	CE_INTVAL_V(g_scaler, 3),
 	CE_INTVAL(g_gamma),
@@ -425,20 +423,21 @@ static const struct {
 	CE_INTVAL_N("adev0_is_nublike", in_adev_is_nublike[0]),
 	CE_INTVAL_N("adev1_is_nublike", in_adev_is_nublike[1]),
 	CE_INTVAL_V(frameskip, 3),
-	CE_INTVAL_P(thread_rendering),
 	CE_INTVAL_P(gpu_peops.iUseDither),
 	CE_INTVAL_P(gpu_peops.dwActFixes),
-	CE_INTVAL_P(gpu_unai.ilace_force),
-	CE_INTVAL_P(gpu_unai.pixel_skip),
-	CE_INTVAL_P(gpu_unai.lighting),
-	CE_INTVAL_P(gpu_unai.fast_lighting),
-	CE_INTVAL_P(gpu_unai.blending),
-	CE_INTVAL_P(gpu_unai.dithering),
 	CE_INTVAL_P(gpu_unai.lineskip),
 	CE_INTVAL_P(gpu_unai.abe_hack),
 	CE_INTVAL_P(gpu_unai.no_light),
 	CE_INTVAL_P(gpu_unai.no_blend),
-	CE_INTVAL_P(gpu_unai.scale_hires),
+#if 0
+	CE_INTVAL_P(gpu_senquack.ilace_force),
+	CE_INTVAL_P(gpu_senquack.pixel_skip),
+	CE_INTVAL_P(gpu_senquack.lighting),
+	CE_INTVAL_P(gpu_senquack.fast_lighting),
+	CE_INTVAL_P(gpu_senquack.blending),
+	CE_INTVAL_P(gpu_senquack.dithering),
+	CE_INTVAL_P(gpu_senquack.scale_hires),
+#endif
 	CE_INTVAL_P(gpu_neon.allow_interlace),
 	CE_INTVAL_P(gpu_neon.enhancement_enable),
 	CE_INTVAL_P(gpu_neon.enhancement_no_main),
@@ -1344,7 +1343,7 @@ static int menu_loop_gfx_options(int id, int keys)
 
 // ------------ bios/plugins ------------
 
-#ifdef __ARM_NEON__
+#ifdef BUILTIN_GPU_NEON
 
 static const char h_gpu_neon[] =
 	"Configure built-in NEON GPU plugin";
@@ -1374,16 +1373,10 @@ static int menu_loop_plugin_gpu_neon(int id, int keys)
 
 static menu_entry e_menu_plugin_gpu_unai[] =
 {
-	//mee_onoff     ("Skip every 2nd line",        0, pl_rearmed_cbs.gpu_unai.lineskip, 1),
-	//mee_onoff     ("Abe's Odyssey hack",         0, pl_rearmed_cbs.gpu_unai.abe_hack, 1),
-	//mee_onoff     ("Disable lighting",           0, pl_rearmed_cbs.gpu_unai.no_light, 1),
-	//mee_onoff     ("Disable blending",           0, pl_rearmed_cbs.gpu_unai.no_blend, 1),
-	mee_onoff     ("Interlace",                  0, pl_rearmed_cbs.gpu_unai.ilace_force, 1),
-	mee_onoff     ("Dithering",                  0, pl_rearmed_cbs.gpu_unai.dithering, 1),
-	mee_onoff     ("Lighting",                   0, pl_rearmed_cbs.gpu_unai.lighting, 1),
-	mee_onoff     ("Fast lighting",              0, pl_rearmed_cbs.gpu_unai.fast_lighting, 1),
-	mee_onoff     ("Blending",                   0, pl_rearmed_cbs.gpu_unai.blending, 1),
-	mee_onoff     ("Pixel skip",                 0, pl_rearmed_cbs.gpu_unai.pixel_skip, 1),
+	mee_onoff     ("Skip every 2nd line",        0, pl_rearmed_cbs.gpu_unai.lineskip, 1),
+	mee_onoff     ("Abe's Odyssey hack",         0, pl_rearmed_cbs.gpu_unai.abe_hack, 1),
+	mee_onoff     ("Disable lighting",           0, pl_rearmed_cbs.gpu_unai.no_light, 1),
+	mee_onoff     ("Disable blending",           0, pl_rearmed_cbs.gpu_unai.no_blend, 1),
 	mee_end,
 };
 
@@ -1393,6 +1386,27 @@ static int menu_loop_plugin_gpu_unai(int id, int keys)
 	me_loop(e_menu_plugin_gpu_unai, &sel);
 	return 0;
 }
+
+static menu_entry e_menu_plugin_gpu_senquack[] =
+{
+#if 0
+	mee_onoff     ("Interlace",                  0, pl_rearmed_cbs.gpu_senquack.ilace_force, 1),
+	mee_onoff     ("Dithering",                  0, pl_rearmed_cbs.gpu_senquack.dithering, 1),
+	mee_onoff     ("Lighting",                   0, pl_rearmed_cbs.gpu_senquack.lighting, 1),
+	mee_onoff     ("Fast lighting",              0, pl_rearmed_cbs.gpu_senquack.fast_lighting, 1),
+	mee_onoff     ("Blending",                   0, pl_rearmed_cbs.gpu_senquack.blending, 1),
+	mee_onoff     ("Pixel skip",                 0, pl_rearmed_cbs.gpu_senquack.pixel_skip, 1),
+#endif
+	mee_end,
+};
+
+static int menu_loop_plugin_gpu_senquack(int id, int keys)
+{
+	int sel = 0;
+	me_loop(e_menu_plugin_gpu_senquack, &sel);
+	return 0;
+}
+
 
 static const char *men_gpu_dithering[] = { "None", "Game dependant", "Always", NULL };
 //static const char h_gpu_0[]            = "Needed for Chrono Cross";
@@ -1474,7 +1488,7 @@ static menu_entry e_menu_plugin_spu[] =
 	mee_range_h   ("Volume boost",              0, volume_boost, -5, 30, h_spu_volboost),
 	mee_onoff     ("Reverb",                    0, spu_config.iUseReverb, 1),
 	mee_enum      ("Interpolation",             0, spu_config.iUseInterpolation, men_spu_interp),
-	mee_onoff     ("Adjust XA pitch",           0, spu_config.iXAPitch, 1),
+	//mee_onoff     ("Adjust XA pitch",           0, spu_config.iXAPitch, 1),
 	mee_onoff_h   ("Adjust tempo",              0, spu_config.iTempo, 1, h_spu_tempo),
 	mee_end,
 };
@@ -1490,11 +1504,12 @@ static const char h_bios[]       = "HLE is simulated BIOS. BIOS selection is sav
 				   "savestates and can't be changed there. Must save\n"
 				   "config and reload the game for change to take effect";
 static const char h_plugin_gpu[] = 
-#ifdef __ARM_NEON__
+#ifdef BUILTIN_GPU_NEON
 				   "builtin_gpu is the NEON GPU, very fast and accurate\n"
 #endif
 				   "gpu_peops is Pete's soft GPU, slow but accurate\n"
 				   "gpu_unai is GPU from PCSX4ALL, fast but glitchy\n"
+				   "gpu_senquack is more accurate but slower\n"
 				   "gpu_gles Pete's hw GPU, uses 3D chip but is glitchy\n"
 				   "must save config and reload the game if changed";
 static const char h_plugin_spu[] = "spunull effectively disables sound\n"
@@ -1502,6 +1517,7 @@ static const char h_plugin_spu[] = "spunull effectively disables sound\n"
 static const char h_gpu_peops[]  = "Configure P.E.Op.S. SoftGL Driver V1.17";
 static const char h_gpu_peopsgl[]= "Configure P.E.Op.S. MesaGL Driver V1.78";
 static const char h_gpu_unai[]   = "Configure Unai/PCSX4ALL Team GPU plugin";
+static const char h_gpu_senquack[]   = "Configure Unai/PCSX4ALL Senquack plugin";
 static const char h_spu[]        = "Configure built-in P.E.Op.S. Sound Driver V1.7";
 
 static menu_entry e_menu_plugin_options[] =
@@ -1509,11 +1525,12 @@ static menu_entry e_menu_plugin_options[] =
 	mee_enum_h    ("BIOS",                          0, bios_sel, bioses, h_bios),
 	mee_enum_h    ("GPU plugin",                    0, gpu_plugsel, gpu_plugins, h_plugin_gpu),
 	mee_enum_h    ("SPU plugin",                    0, spu_plugsel, spu_plugins, h_plugin_spu),
-#ifdef __ARM_NEON__
+#ifdef BUILTIN_GPU_NEON
 	mee_handler_h ("Configure built-in GPU plugin", menu_loop_plugin_gpu_neon, h_gpu_neon),
 #endif
 	mee_handler_h ("Configure gpu_peops plugin",    menu_loop_plugin_gpu_peops, h_gpu_peops),
 	mee_handler_h ("Configure gpu_unai GPU plugin", menu_loop_plugin_gpu_unai, h_gpu_unai),
+	mee_handler_h ("Configure gpu_senquack GPU plugin", menu_loop_plugin_gpu_senquack, h_gpu_senquack),
 	mee_handler_h ("Configure gpu_gles GPU plugin", menu_loop_plugin_gpu_peopsgl, h_gpu_peopsgl),
 	mee_handler_h ("Configure built-in SPU plugin", menu_loop_plugin_spu, h_spu),
 	mee_end,
@@ -1538,8 +1555,6 @@ static int menu_loop_plugin_options(int id, int keys)
 // ------------ adv options menu ------------
 
 #ifndef DRC_DISABLE
-static const char h_cfg_psxclk[]  = "Over/under-clock the PSX, default is " DEFAULT_PSX_CLOCK_S "\n"
-				    "(lower value - less work for the emu, may be faster)";
 static const char h_cfg_noch[]    = "Disables game-specific compatibility hacks";
 static const char h_cfg_nosmc[]   = "Will cause crashes when loading, break memcards";
 static const char h_cfg_gteunn[]  = "May cause graphical glitches";
@@ -1550,22 +1565,25 @@ static const char h_cfg_stalls[]  = "Will cause some games to run too fast";
 static menu_entry e_menu_speed_hacks[] =
 {
 #ifndef DRC_DISABLE
-	mee_range_h   ("PSX CPU clock, %%",        0, psx_clock, 1, 500, h_cfg_psxclk),
 	mee_onoff_h   ("Disable compat hacks",     0, new_dynarec_hacks, NDHACK_NO_COMPAT_HACKS, h_cfg_noch),
 	mee_onoff_h   ("Disable SMC checks",       0, new_dynarec_hacks, NDHACK_NO_SMC_CHECK, h_cfg_nosmc),
 	mee_onoff_h   ("Assume GTE regs unneeded", 0, new_dynarec_hacks, NDHACK_GTE_UNNEEDED, h_cfg_gteunn),
 	mee_onoff_h   ("Disable GTE flags",        0, new_dynarec_hacks, NDHACK_GTE_NO_FLAGS, h_cfg_gteflgs),
 #endif
-	mee_onoff_h   ("Disable CPU/GTE stalls",   0, Config.DisableStalls, 1, h_cfg_stalls),
+	mee_onoff_h   ("Disable CPU/GTE stalls",   0, menu_iopts[0], 1, h_cfg_stalls),
 	mee_end,
 };
 
 static int menu_loop_speed_hacks(int id, int keys)
 {
 	static int sel = 0;
+	menu_iopts[0] = Config.DisableStalls;
 	me_loop(e_menu_speed_hacks, &sel);
+	Config.DisableStalls = menu_iopts[0];
 	return 0;
 }
+
+static const char *men_gpul[]    = { "Auto", "Off", "On", NULL };
 
 static const char h_cfg_cpul[]   = "Shows CPU usage in %";
 static const char h_cfg_spu[]    = "Shows active SPU channels\n"
@@ -1574,37 +1592,32 @@ static const char h_cfg_fl[]     = "Frame Limiter keeps the game from running to
 static const char h_cfg_xa[]     = "Disables XA sound, which can sometimes improve performance";
 static const char h_cfg_cdda[]   = "Disable CD Audio for a performance boost\n"
 				   "(proper .cue/.bin dump is needed otherwise)";
-//static const char h_cfg_sio[]    = "You should not need this, breaks games";
-static const char h_cfg_spuirq[] = "Compatibility tweak; should be left off";
-static const char h_cfg_rcnt2[]  = "InuYasha Sengoku Battle Fix\n"
-				   "(timing hack, breaks other games)";
-#ifdef DRC_DISABLE
-static const char h_cfg_rcnt1[]  = "Parasite Eve 2, Vandal Hearts 1/2 Fix\n"
-				   "(timing hack, breaks other games)";
-#else
+#ifndef DRC_DISABLE
 static const char h_cfg_nodrc[]  = "Disable dynamic recompiler and use interpreter\n"
 				   "Might be useful to overcome some dynarec bugs";
 #endif
 static const char h_cfg_shacks[] = "Breaks games but may give better performance";
 static const char h_cfg_icache[] = "Support F1 games (only when dynarec is off)";
+static const char h_cfg_gpul[]   = "Try enabling this if the game is missing some graphics\n"
+				   "causes a performance hit";
+static const char h_cfg_psxclk[]  = "Over/under-clock the PSX, default is " DEFAULT_PSX_CLOCK_S "\n"
+				    "(adjust this if the game is too slow/too fast/hangs)";
+
+enum { AMO_XA, AMO_CDDA, AMO_IC, AMO_CPU, AMO_GPUL };
 
 static menu_entry e_menu_adv_options[] =
 {
 	mee_onoff_h   ("Show CPU load",          0, g_opts, OPT_SHOWCPU, h_cfg_cpul),
 	mee_onoff_h   ("Show SPU channels",      0, g_opts, OPT_SHOWSPU, h_cfg_spu),
 	mee_onoff_h   ("Disable Frame Limiter",  0, g_opts, OPT_NO_FRAMELIM, h_cfg_fl),
-	mee_onoff_h   ("Disable XA Decoding",    0, Config.Xa, 1, h_cfg_xa),
-	mee_onoff_h   ("Disable CD Audio",       0, Config.Cdda, 1, h_cfg_cdda),
-	//mee_onoff_h   ("SIO IRQ Always Enabled", 0, Config.Sio, 1, h_cfg_sio),
-	mee_onoff_h   ("SPU IRQ Always Enabled", 0, Config.SpuIrq, 1, h_cfg_spuirq),
-	mee_onoff_h   ("ICache emulation",       0, Config.icache_emulation, 1, h_cfg_icache),
-#ifdef DRC_DISABLE
-	mee_onoff_h   ("Rootcounter hack",       0, Config.RCntFix, 1, h_cfg_rcnt1),
+	mee_onoff_h   ("Disable XA Decoding",    0, menu_iopts[AMO_XA],   1, h_cfg_xa),
+	mee_onoff_h   ("Disable CD Audio",       0, menu_iopts[AMO_CDDA], 1, h_cfg_cdda),
+	mee_onoff_h   ("ICache emulation",       0, menu_iopts[AMO_IC],   1, h_cfg_icache),
+	mee_enum_h    ("GPU l-list slow walking",0, menu_iopts[AMO_GPUL], men_gpul, h_cfg_gpul),
+#if !defined(DRC_DISABLE) || defined(LIGHTREC)
+	mee_onoff_h   ("Disable dynarec (slow!)",0, menu_iopts[AMO_CPU],  1, h_cfg_nodrc),
 #endif
-	mee_onoff_h   ("Rootcounter hack 2",     0, Config.VSyncWA, 1, h_cfg_rcnt2),
-#ifndef DRC_DISABLE
-	mee_onoff_h   ("Disable dynarec (slow!)",0, Config.Cpu, 1, h_cfg_nodrc),
-#endif
+	mee_range_h   ("PSX CPU clock, %",       0, psx_clock, 1, 500, h_cfg_psxclk),
 	mee_handler_h ("[Speed hacks]",             menu_loop_speed_hacks, h_cfg_shacks),
 	mee_end,
 };
@@ -1612,7 +1625,26 @@ static menu_entry e_menu_adv_options[] =
 static int menu_loop_adv_options(int id, int keys)
 {
 	static int sel = 0;
+	static struct {
+		boolean *opt;
+		int *mopt;
+	} opts[] = {
+		{ &Config.Xa,      &menu_iopts[AMO_XA] },
+		{ &Config.Cdda,    &menu_iopts[AMO_CDDA] },
+		{ &Config.icache_emulation, &menu_iopts[AMO_IC] },
+		{ &Config.Cpu,     &menu_iopts[AMO_CPU] },
+	};
+	int i;
+	for (i = 0; i < ARRAY_SIZE(opts); i++)
+		*opts[i].mopt = *opts[i].opt;
+	menu_iopts[AMO_GPUL] = Config.GpuListWalking + 1;
+
 	me_loop(e_menu_adv_options, &sel);
+
+	for (i = 0; i < ARRAY_SIZE(opts); i++)
+		*opts[i].opt = *opts[i].mopt;
+	Config.GpuListWalking = menu_iopts[AMO_GPUL] - 1;
+
 	return 0;
 }
 
@@ -1964,7 +1996,7 @@ static const char credits_text[] =
 	"(C) 2005-2009 PCSX-df Team\n"
 	"(C) 2009-2011 PCSX-Reloaded Team\n\n"
 	"ARM recompiler (C) 2009-2011 Ari64\n"
-#ifdef __ARM_NEON__
+#ifdef BUILTIN_GPU_NEON
 	"ARM NEON GPU (c) 2011-2012 Exophase\n"
 #endif
 	"PEOpS GPU and SPU by Pete Bernert\n"
@@ -2618,7 +2650,7 @@ void menu_prepare_emu(void)
 
 	plat_video_menu_leave();
 
-	#ifndef DRC_DISABLE
+	#if !defined(DRC_DISABLE) || defined(LIGHTREC)
 	psxCpu = (Config.Cpu == CPU_INTERPRETER) ? &psxInt : &psxRec;
 	#else
 	psxCpu = &psxInt;
@@ -2630,6 +2662,7 @@ void menu_prepare_emu(void)
 		psxCpu->Reset();
 	}
 
+	menu_sync_config();
 	psxCpu->ApplyConfig();
 
 	// core doesn't care about Config.Cdda changes,
@@ -2637,7 +2670,6 @@ void menu_prepare_emu(void)
 	if (Config.Cdda)
 		CDR_stop();
 
-	menu_sync_config();
 	if (cpu_clock > 0)
 		plat_target_cpu_clock_set(cpu_clock);
 

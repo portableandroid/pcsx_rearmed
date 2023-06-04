@@ -4,9 +4,9 @@
 ; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
 ;
 [subrepo]
-	remote = https://git.savannah.gnu.org/git/lightning.git
-	branch = master
-	commit = 876c1043bec5bfd594482b40700c84693e40d0eb
-	parent = cef02748fe77c0d29b441447659262ce1da47c4b
+	remote = https://github.com/pcercuei/gnu_lightning.git
+	branch = pcsx_rearmed
+	commit = b910a469a9bea63056eb53430dea4c7b56e447a8
+	parent = 13b02197fcb7575646408094d5583ed7391b1153
 	method = merge
 	cmdver = 0.4.3
