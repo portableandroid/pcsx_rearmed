@@ -11,7 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define REG_PC (offsetof(struct lightrec_state, next_pc) / sizeof(u32))
+#define REG_PC (offsetof(struct lightrec_state, curr_pc) / sizeof(u32))
 
 enum reg_priority {
 	REG_IS_TEMP,
@@ -48,6 +48,10 @@ static const char * mips_regs[] = {
 	"gp", "sp", "fp", "ra",
 	"lo", "hi",
 };
+
+/* Forward declaration(s) */
+static void clean_reg(jit_state_t *_jit,
+		      struct native_register *nreg, u8 jit_reg, bool clean);
 
 const char * lightrec_reg_name(u8 reg)
 {
@@ -219,14 +223,7 @@ static void lightrec_discard_nreg(struct native_register *nreg)
 static void lightrec_unload_nreg(struct regcache *cache, jit_state_t *_jit,
 		struct native_register *nreg, u8 jit_reg)
 {
-	/* If we get a dirty register, store back the old value */
-	if (nreg->prio == REG_IS_DIRTY) {
-		s16 offset = offsetof(struct lightrec_state, regs.gpr)
-			+ (nreg->emulated_register << 2);
-
-		jit_stxi_i(offset, LIGHTREC_REG_STATE, jit_reg);
-	}
-
+	clean_reg(_jit, nreg, jit_reg, false);
 	lightrec_discard_nreg(nreg);
 }
 
@@ -297,6 +294,21 @@ void lightrec_temp_set_value(struct regcache *cache, u8 jit_reg, intptr_t value)
 
 	nreg->prio = REG_IS_TEMP_VALUE;
 	nreg->value = value;
+}
+
+u8 lightrec_alloc_reg_temp_with_value(struct regcache *cache,
+				      jit_state_t *_jit, intptr_t value)
+{
+	s8 reg;
+
+	reg = lightrec_get_reg_with_value(cache, value);
+	if (reg < 0) {
+		reg = lightrec_alloc_reg_temp(cache, _jit);
+		jit_movi((u8)reg, value);
+		lightrec_temp_set_value(cache, (u8)reg, value);
+	}
+
+	return (u8)reg;
 }
 
 u8 lightrec_alloc_reg_out(struct regcache *cache, jit_state_t *_jit,
@@ -403,6 +415,22 @@ u8 lightrec_alloc_reg_in(struct regcache *cache, jit_state_t *_jit,
 	return jit_reg;
 }
 
+void lightrec_remap_reg(struct regcache *cache, jit_state_t *_jit,
+			u8 jit_reg, u16 reg_out, bool discard)
+{
+	struct native_register *nreg;
+
+	lightrec_discard_reg_if_loaded(cache, reg_out);
+
+	nreg = lightning_reg_to_lightrec(cache, jit_reg);
+	clean_reg(_jit, nreg, jit_reg, !discard);
+
+	nreg->output = true;
+	nreg->emulated_register = reg_out;
+	nreg->extend = nreg->extended;
+	nreg->zero_extend = nreg->zero_extended;
+}
+
 static bool reg_pc_is_mapped(struct regcache *cache)
 {
 	struct native_register *nreg = lightning_reg_to_lightrec(cache, JIT_V0);
@@ -425,20 +453,31 @@ void lightrec_load_next_pc_imm(struct regcache *cache,
 			       jit_state_t *_jit, u32 pc, u32 imm)
 {
 	struct native_register *nreg = lightning_reg_to_lightrec(cache, JIT_V0);
+	u8 reg = JIT_V0;
+
+	if (lightrec_store_next_pc())
+		reg = lightrec_alloc_reg_temp(cache, _jit);
 
 	if (reg_pc_is_mapped(cache)) {
 		/* JIT_V0 contains next PC - so we can overwrite it */
-		lightrec_load_imm(cache, _jit, JIT_V0, pc, imm);
+		lightrec_load_imm(cache, _jit, reg, pc, imm);
 	} else {
 		/* JIT_V0 contains something else - invalidate it */
-		lightrec_unload_reg(cache, _jit, JIT_V0);
+		if (reg == JIT_V0)
+		      lightrec_unload_reg(cache, _jit, JIT_V0);
 
-		jit_movi(JIT_V0, imm);
+		jit_movi(reg, imm);
 	}
 
-	nreg->prio = REG_IS_LOADED;
-	nreg->emulated_register = -1;
-	nreg->locked = true;
+	if (lightrec_store_next_pc()) {
+		jit_stxi_i(offsetof(struct lightrec_state, next_pc),
+			   LIGHTREC_REG_STATE, reg);
+		lightrec_free_reg(cache, reg);
+	} else {
+		nreg->prio = REG_IS_LOADED;
+		nreg->emulated_register = -1;
+		nreg->locked = true;
+	}
 }
 
 void lightrec_load_next_pc(struct regcache *cache, jit_state_t *_jit, u8 reg)
@@ -446,6 +485,15 @@ void lightrec_load_next_pc(struct regcache *cache, jit_state_t *_jit, u8 reg)
 	struct native_register *nreg_v0, *nreg;
 	u16 offset;
 	u8 jit_reg;
+
+	if (lightrec_store_next_pc()) {
+		jit_reg = lightrec_alloc_reg_in(cache, _jit, reg, 0);
+		offset = offsetof(struct lightrec_state, next_pc);
+		jit_stxi_i(offset, LIGHTREC_REG_STATE, jit_reg);
+		lightrec_free_reg(cache, jit_reg);
+
+		return;
+	}
 
 	/* Invalidate JIT_V0 if it is not mapped to 'reg' */
 	nreg_v0 = lightning_reg_to_lightrec(cache, JIT_V0);
@@ -484,10 +532,15 @@ void lightrec_load_next_pc(struct regcache *cache, jit_state_t *_jit, u8 reg)
 		lightrec_discard_nreg(nreg);
 	}
 
-	lightrec_clean_reg(cache, _jit, JIT_V0);
+	if (lightrec_store_next_pc()) {
+		jit_stxi_i(offsetof(struct lightrec_state, next_pc),
+			   LIGHTREC_REG_STATE, JIT_V0);
+	} else {
+		lightrec_clean_reg(cache, _jit, JIT_V0);
 
-	nreg_v0->zero_extended = true;
-	nreg_v0->locked = true;
+		nreg_v0->zero_extended = true;
+		nreg_v0->locked = true;
+	}
 }
 
 static void free_reg(struct native_register *nreg)
@@ -519,6 +572,7 @@ void lightrec_free_regs(struct regcache *cache)
 static void clean_reg(jit_state_t *_jit,
 		struct native_register *nreg, u8 jit_reg, bool clean)
 {
+	/* If we get a dirty register, store back the old value */
 	if (nreg->prio == REG_IS_DIRTY) {
 		s16 offset = offsetof(struct lightrec_state, regs.gpr)
 			+ (nreg->emulated_register << 2);
@@ -579,6 +633,11 @@ void lightrec_clean_reg(struct regcache *cache, jit_state_t *_jit, u8 jit_reg)
 	}
 }
 
+bool lightrec_reg_is_loaded(struct regcache *cache, u16 reg)
+{
+	return !!find_mapped_reg(cache, reg, false);
+}
+
 void lightrec_clean_reg_if_loaded(struct regcache *cache, jit_state_t *_jit,
 				  u16 reg, bool unload)
 {
@@ -629,7 +688,7 @@ void lightrec_regcache_reset(struct regcache *cache)
 	memset(&cache->lightrec_regs, 0, sizeof(cache->lightrec_regs));
 }
 
-void lightrec_preload_pc(struct regcache *cache)
+void lightrec_preload_pc(struct regcache *cache, jit_state_t *_jit)
 {
 	struct native_register *nreg;
 
@@ -638,6 +697,8 @@ void lightrec_preload_pc(struct regcache *cache)
 	nreg->emulated_register = REG_PC;
 	nreg->prio = REG_IS_LOADED;
 	nreg->zero_extended = true;
+
+	jit_live(JIT_V0);
 }
 
 struct regcache * lightrec_regcache_init(struct lightrec_state *state)

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022  Free Software Foundation, Inc.
+ * Copyright (C) 2023  Free Software Foundation, Inc.
  *
  * This file is part of GNU lightning.
  *
@@ -73,5 +73,16 @@ typedef enum {
 #define JIT_NOREG		_NOREG
     _NOREG,
 } jit_reg_t;
+
+typedef struct {
+    /* generate special instructions for unaligned load/store? */
+    /* It is not guaranteed unaligned memory access is supported. */
+    jit_uint32_t unaligned	: 1;
+} jit_cpu_t;
+
+/*
+ * Initialization
+ */
+extern jit_cpu_t		jit_cpu;
 
 #endif /* _jit_loongarch_h */

@@ -13,6 +13,14 @@
 
 #include <stdint.h>
 
+//#define RAW_FB_DISPLAY
+
+#define gpu_log(fmt, ...) \
+  printf("%d:%03d: " fmt, *gpu.state.frame_count, *gpu.state.hcnt, ##__VA_ARGS__)
+
+//#define log_anomaly gpu_log
+#define log_anomaly(...)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -34,6 +42,7 @@ extern "C" {
 #define BIT(x) (1 << (x))
 
 #define PSX_GPU_STATUS_DHEIGHT		BIT(19)
+#define PSX_GPU_STATUS_PAL		BIT(20)
 #define PSX_GPU_STATUS_RGB24		BIT(21)
 #define PSX_GPU_STATUS_INTERLACE	BIT(22)
 #define PSX_GPU_STATUS_BLANKING		BIT(23)
@@ -53,6 +62,7 @@ struct psx_gpu {
     int x, y, w, h;
     int x1, x2;
     int y1, y2;
+    int src_x, src_y;
   } screen;
   struct {
     int x, y, w, h;
@@ -67,8 +77,10 @@ struct psx_gpu {
     uint32_t blanked:1;
     uint32_t enhancement_enable:1;
     uint32_t enhancement_active:1;
+    uint32_t enhancement_was_active:1;
     uint32_t downscale_enable:1;
     uint32_t downscale_active:1;
+    uint32_t dims_changed:1;
     uint32_t *frame_count;
     uint32_t *hcnt; /* hsync count */
     struct {
@@ -78,6 +90,11 @@ struct psx_gpu {
       uint32_t hcnt;
     } last_list;
     uint32_t last_vram_read_frame;
+    uint32_t w_out_old, h_out_old, status_vo_old;
+    short screen_centering_type;
+    short screen_centering_type_default;
+    int screen_centering_x;
+    int screen_centering_y;
   } state;
   struct {
     int32_t set:3; /* -1 auto, 0 off, 1-3 fixed */
@@ -92,33 +109,35 @@ struct psx_gpu {
     uint32_t pending_fill[3];
   } frameskip;
   uint32_t scratch_ex_regs[8]; // for threaded rendering
-  int useDithering:1; /* 0 - off , 1 - on */
-  uint16_t *(*get_enhancement_bufer)
+  void *(*get_enhancement_bufer)
     (int *x, int *y, int *w, int *h, int *vram_h);
   uint16_t *(*get_downscale_buffer)
     (int *x, int *y, int *w, int *h, int *vram_h);
   void *(*mmap)(unsigned int size);
   void  (*munmap)(void *ptr, unsigned int size);
+  void  (*gpu_state_change)(int what); // psx_gpu_state
 };
 
 extern struct psx_gpu gpu;
 
 extern const unsigned char cmd_lengths[256];
 
-int do_cmd_list(uint32_t *list, int count, int *last_cmd);
+int do_cmd_list(uint32_t *list, int count,
+	int *cycles_sum, int *cycles_last, int *last_cmd);
 
 struct rearmed_cbs;
 
 int  renderer_init(void);
 void renderer_finish(void);
 void renderer_sync_ecmds(uint32_t * ecmds);
-void renderer_update_caches(int x, int y, int w, int h);
+void renderer_update_caches(int x, int y, int w, int h, int state_changed);
 void renderer_flush_queues(void);
 void renderer_set_interlace(int enable, int is_odd);
 void renderer_set_config(const struct rearmed_cbs *config);
 void renderer_notify_res_change(void);
 void renderer_notify_update_lace(int updated);
 void renderer_sync(void);
+void renderer_notify_scanout_change(int x, int y);
 
 int  vout_init(void);
 int  vout_finish(void);
@@ -132,7 +151,8 @@ struct GPUFreeze;
 long GPUinit(void);
 long GPUshutdown(void);
 void GPUwriteDataMem(uint32_t *mem, int count);
-long GPUdmaChain(uint32_t *rambase, uint32_t addr, uint32_t *progress_addr);
+long GPUdmaChain(uint32_t *rambase, uint32_t addr,
+		uint32_t *progress_addr, int32_t *cycles_last_cmd);
 void GPUwriteData(uint32_t data);
 void GPUreadDataMem(uint32_t *mem, int count);
 uint32_t GPUreadData(void);
@@ -140,9 +160,10 @@ uint32_t GPUreadStatus(void);
 void GPUwriteStatus(uint32_t data);
 long GPUfreeze(uint32_t type, struct GPUFreeze *freeze);
 void GPUupdateLace(void);
-long GPUopen(void **dpy);
+long GPUopen(unsigned long *disp, char *cap, char *cfg);
 long GPUclose(void);
 void GPUvBlank(int is_vblank, int lcf);
+void GPUgetScreenInfo(int *y, int *base_hres);
 void GPUrearmedCallbacks(const struct rearmed_cbs *cbs_);
 
 #ifdef __cplusplus

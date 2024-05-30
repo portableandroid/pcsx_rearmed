@@ -23,13 +23,17 @@
 #include "plat.h"
 #include "../libpcsxcore/misc.h"
 #include "../libpcsxcore/cheat.h"
+#include "../libpcsxcore/sio.h"
+#include "../libpcsxcore/database.h"
 #include "../libpcsxcore/new_dynarec/new_dynarec.h"
 #include "../plugins/cdrcimg/cdrcimg.h"
 #include "../plugins/dfsound/spu_config.h"
 #include "arm_features.h"
 #include "revision.h"
 
-#if defined(__has_builtin)
+#if defined(__EMSCRIPTEN__)
+#define DO_CPU_CHECKS 0
+#elif defined(__has_builtin)
 #define DO_CPU_CHECKS __has_builtin(__builtin_cpu_init)
 #elif defined(__x86_64__) || defined(__i386__)
 #define DO_CPU_CHECKS 1
@@ -134,26 +138,22 @@ void emu_set_default_config(void)
 	Config.PsxAuto = 1;
 	Config.cycle_multiplier = CYCLE_MULT_DEFAULT;
 	Config.GpuListWalking = -1;
+	Config.FractionalFramerate = -1;
 
 	pl_rearmed_cbs.gpu_neon.allow_interlace = 2; // auto
 	pl_rearmed_cbs.gpu_neon.enhancement_enable =
 	pl_rearmed_cbs.gpu_neon.enhancement_no_main = 0;
 	pl_rearmed_cbs.gpu_peops.iUseDither = 0;
 	pl_rearmed_cbs.gpu_peops.dwActFixes = 1<<7;
-#if 0
-	pl_rearmed_cbs.gpu_senquack.ilace_force = 0;
-	pl_rearmed_cbs.gpu_senquack.pixel_skip = 0;
-	pl_rearmed_cbs.gpu_senquack.lighting = 1;
-	pl_rearmed_cbs.gpu_senquack.fast_lighting = 0;
-	pl_rearmed_cbs.gpu_senquack.blending = 1;
-	pl_rearmed_cbs.gpu_senquack.dithering = 0;
-#else
+	pl_rearmed_cbs.gpu_unai.ilace_force = 0;
+	pl_rearmed_cbs.gpu_unai.pixel_skip = 0;
 	pl_rearmed_cbs.gpu_unai.lighting = 1;
+	pl_rearmed_cbs.gpu_unai.fast_lighting = 0;
 	pl_rearmed_cbs.gpu_unai.blending = 1;
-#endif
-	pl_rearmed_cbs.gpu_unai.abe_hack =
-	pl_rearmed_cbs.gpu_unai.no_light =
-	pl_rearmed_cbs.gpu_unai.no_blend = 0;
+	pl_rearmed_cbs.gpu_unai.dithering = 0;
+	pl_rearmed_cbs.gpu_unai_old.abe_hack =
+	pl_rearmed_cbs.gpu_unai_old.no_light =
+	pl_rearmed_cbs.gpu_unai_old.no_blend = 0;
 	memset(&pl_rearmed_cbs.gpu_peopsgl, 0, sizeof(pl_rearmed_cbs.gpu_peopsgl));
 	pl_rearmed_cbs.gpu_peopsgl.iVRamSize = 64;
 	pl_rearmed_cbs.gpu_peopsgl.iTexGarbageCollection = 1;
@@ -163,7 +163,8 @@ void emu_set_default_config(void)
 	spu_config.iXAPitch = 0;
 	spu_config.iVolume = 768;
 	spu_config.iTempo = 0;
-	spu_config.iUseThread = 1; // no effect if only 1 core is detected
+	// may cause issues, no effect if only 1 core is detected
+	spu_config.iUseThread = 0;
 #if defined(HAVE_PRE_ARMV7) && !defined(_3DS) /* XXX GPH hack */
 	spu_config.iUseReverb = 0;
 	spu_config.iUseInterpolation = 0;
@@ -290,6 +291,10 @@ do_state_slot:
 				SysMessage("GPU_open returned %d", ret);
 		}
 		return;
+	case SACTION_ANALOG_TOGGLE:
+		ret = padToggleAnalog(0);
+		snprintf(hud_msg, sizeof(hud_msg), "ANALOG %s", ret ? "ON" : "OFF");
+		break;
 #endif
 	default:
 		return;
@@ -414,9 +419,15 @@ void emu_on_new_cd(int show_hud_msg)
 		SysPrintf("note: running with HLE BIOS, expect compatibility problems\n");
 		SysPrintf("----------------------------------------------------------\n");
 	}
+	if (Config.TurboCD)
+		SysPrintf("note: TurboCD is enabled, this breaks games\n");
 
 	if (show_hud_msg) {
-		snprintf(hud_msg, sizeof(hud_msg), BOOT_MSG);
+		if (check_unsatisfied_libcrypt())
+			snprintf(hud_msg, sizeof(hud_msg),
+				"LibCrypt protected game with missing SBI detected");
+		else
+			snprintf(hud_msg, sizeof(hud_msg), BOOT_MSG);
 		hud_new_msg = 3;
 	}
 }
@@ -437,6 +448,49 @@ static void log_wrong_cpu(void)
 	CHECK_CPU("sse4.1");
 #endif
 #endif // DO_CPU_CHECKS
+}
+
+#define MKSTR2(x) #x
+#define MKSTR(x) MKSTR2(x)
+static const char *get_build_info(void)
+{
+	return " ("
+#ifdef __VERSION__
+		"cc " __VERSION__ " "
+#endif
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+		"64bit "
+#elif defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 4
+		"32bit "
+#endif
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+		"be "
+#endif
+#if defined(__PIC__) || defined(__pic__)
+		"pic "
+#endif
+#if defined(__aarch64__)
+		"arm64"
+#elif defined(__arm__)
+		"arm"
+#endif
+#ifdef __ARM_ARCH
+		"v" MKSTR(__ARM_ARCH) " "
+#endif
+#if defined(__AVX__)
+		"avx "
+#elif defined(__SSSE3__)
+		"ssse3 "
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+		"neon "
+#endif
+#if defined(LIGHTREC)
+		"lightrec "
+#elif !defined(DRC_DISABLE)
+		"ari64 "
+#endif
+		"gpu=" MKSTR(BUILTIN_GPU)
+		")";
 }
 
 int emu_core_preinit(void)
@@ -468,7 +522,7 @@ int emu_core_preinit(void)
 
 int emu_core_init(void)
 {
-	SysPrintf("Starting PCSX-ReARMed " REV "\n");
+	SysPrintf("Starting PCSX-ReARMed " REV "%s\n", get_build_info());
 
 #ifndef NO_FRONTEND
 	check_profile();
@@ -491,7 +545,7 @@ int emu_core_init(void)
 
 void emu_core_ask_exit(void)
 {
-	stop = 1;
+	stop++;
 	g_emu_want_quit = 1;
 }
 
@@ -545,6 +599,7 @@ int main(int argc, char *argv[])
 {
 	char file[MAXPATHLEN] = "";
 	char path[MAXPATHLEN];
+	char isofilename[MAXPATHLEN];
 	const char *cdfile = NULL;
 	const char *loadst_f = NULL;
 	int psxout = 0;
@@ -563,8 +618,6 @@ int main(int argc, char *argv[])
 			SysPrintf("Using config file %s.\n", cfgfile_basename);
 		}
 		else if (!strcmp(argv[i], "-cdfile")) {
-			char isofilename[MAXPATHLEN];
-
 			if (i+1 >= argc) break;
 			strncpy(isofilename, argv[++i], MAXPATHLEN);
 			if (isofilename[0] != '/') {
@@ -670,6 +723,8 @@ int main(int argc, char *argv[])
 	}
 
 	if (ready_to_go) {
+		if (menu_load_config(1) != 0)
+			menu_load_config(0);
 		menu_prepare_emu();
 
 		// If a state has been specified, then load that
@@ -707,8 +762,8 @@ static void toggle_fast_forward(int force_off)
 {
 	static int fast_forward;
 	static int normal_g_opts;
-	static int normal_frameskip;
 	static int normal_enhancement_enable;
+	//static int normal_frameskip;
 
 	if (force_off && !fast_forward)
 		return;
@@ -716,16 +771,16 @@ static void toggle_fast_forward(int force_off)
 	fast_forward = !fast_forward;
 	if (fast_forward) {
 		normal_g_opts = g_opts;
-		normal_frameskip = pl_rearmed_cbs.frameskip;
+		//normal_frameskip = pl_rearmed_cbs.frameskip;
 		normal_enhancement_enable =
 			pl_rearmed_cbs.gpu_neon.enhancement_enable;
 
 		g_opts |= OPT_NO_FRAMELIM;
-		pl_rearmed_cbs.frameskip = 3;
+		// pl_rearmed_cbs.frameskip = 3; // too broken
 		pl_rearmed_cbs.gpu_neon.enhancement_enable = 0;
 	} else {
 		g_opts = normal_g_opts;
-		pl_rearmed_cbs.frameskip = normal_frameskip;
+		//pl_rearmed_cbs.frameskip = normal_frameskip;
 		pl_rearmed_cbs.gpu_neon.enhancement_enable =
 			normal_enhancement_enable;
 
@@ -740,7 +795,7 @@ static void toggle_fast_forward(int force_off)
 static void SignalExit(int sig) {
 	// only to restore framebuffer/resolution on some devices
 	plat_finish();
-	exit(1);
+	_exit(1);
 }
 #endif
 
@@ -763,7 +818,7 @@ void SysReset() {
 	// reset can run code, timing must be set
 	pl_timing_prepare(Config.PsxType);
 
-   // hmh core forgets this
+	// hmh core forgets this
 	CDR_stop();
    
 	EmuReset();
@@ -782,9 +837,6 @@ void SysClose() {
 		fclose(emuLog);
 		emuLog = NULL;
 	}
-}
-
-void SysUpdate() {
 }
 
 int get_state_filename(char *buf, int size, int i) {
@@ -892,8 +944,6 @@ static int _OpenPlugins(void) {
 	signal(SIGINT, SignalExit);
 	signal(SIGPIPE, SignalExit);
 #endif
-
-	GPU_clearDynarec(clearDynarec);
 
 	ret = CDR_open();
 	if (ret < 0) { SysMessage(_("Error opening CD-ROM plugin!")); return -1; }
@@ -1057,7 +1107,7 @@ void *SysLoadSym(void *lib, const char *sym) {
 
 const char *SysLibError() {
 #if defined(NO_DYLIB)
-   return NULL;
+	return NULL;
 #elif !defined(_WIN32)
 	return dlerror();
 #else

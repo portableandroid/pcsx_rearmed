@@ -21,4 +21,6 @@
 
 #define jit_b()			jit_beqr(0, 0)
 
+#define jit_add_state(u,v)	jit_addr(u,v,LIGHTREC_REG_STATE)
+
 #endif /* __LIGHTNING_WRAPPER_H__ */

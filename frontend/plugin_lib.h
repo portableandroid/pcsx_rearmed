@@ -23,7 +23,6 @@ enum {
 	DKEY_CROSS,
 	DKEY_SQUARE,
 };
-extern int in_state_gun;
 extern int in_type[8];
 extern int multitap1;
 extern int multitap2;
@@ -45,22 +44,26 @@ void  pl_start_watchdog(void);
 void *pl_prepare_screenshot(int *w, int *h, int *bpp);
 void  pl_init(void);
 void  pl_switch_dispmode(void);
+void  pl_force_clear(void);
 
 void  pl_timing_prepare(int is_pal);
 void  pl_frame_limit(void);
 
+// for communication with gpulib
 struct rearmed_cbs {
 	void  (*pl_get_layer_pos)(int *x, int *y, int *w, int *h);
 	int   (*pl_vout_open)(void);
 	void  (*pl_vout_set_mode)(int w, int h, int raw_w, int raw_h, int bpp);
 	void  (*pl_vout_flip)(const void *vram, int stride, int bgr24,
-			      int w, int h);
+			      int x, int y, int w, int h, int dims_changed);
 	void  (*pl_vout_close)(void);
 	void *(*mmap)(unsigned int size);
 	void  (*munmap)(void *ptr, unsigned int size);
 	// only used by some frontends
 	void  (*pl_vout_set_raw_vram)(void *vram);
 	void  (*pl_set_gpu_caps)(int caps);
+	// emulation related
+	void  (*gpu_state_change)(int what);
 	// some stats, for display by some plugins
 	int flips_per_sec, cpu_usage;
 	float vsps_cur; // currect vsync/s
@@ -82,6 +85,7 @@ struct rearmed_cbs {
 		int   enhancement_enable;
 		int   enhancement_no_main;
 		int   allow_dithering;
+		int   enhancement_tex_adj;
 	} gpu_neon;
 	struct {
 		int   iUseDither;
@@ -90,17 +94,18 @@ struct rearmed_cbs {
 		int   dwFrameRateTicks;
 	} gpu_peops;
 	struct {
+		int   abe_hack;
+		int   no_light, no_blend;
+		int   lineskip;
+	} gpu_unai_old;
+	struct {
 		int ilace_force;
 		int pixel_skip;
 		int lighting;
 		int fast_lighting;
 		int blending;
 		int dithering;
-		// old gpu_unai config for compatibility
-		int   abe_hack;
-		int   no_light, no_blend;
-		int   lineskip;
-		int   scale_hires;
+		int scale_hires;
 	} gpu_unai;
 	struct {
 		int   dwActFixes;
@@ -110,9 +115,15 @@ struct rearmed_cbs {
 	} gpu_peopsgl;
 	// misc
 	int gpu_caps;
+	int screen_centering_type;
+	int screen_centering_type_default;
+	int screen_centering_x;
+	int screen_centering_y;
 };
 
 extern struct rearmed_cbs pl_rearmed_cbs;
+
+enum centering_type { C_AUTO = 0, C_INGAME, C_BORDERLESS, C_MANUAL };
 
 enum gpu_plugin_caps {
 	GPU_CAP_OWNS_DISPLAY = (1 << 0),

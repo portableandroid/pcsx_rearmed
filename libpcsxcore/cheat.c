@@ -19,6 +19,8 @@
 #include "psxcommon.h"
 #include "r3000a.h"
 #include "psxmem.h"
+#include "misc.h"
+#include "../frontend/plugin_lib.h" // in_keystate for D4
 
 #include "cheat.h"
 
@@ -180,51 +182,6 @@ void SaveCheats(const char *filename) {
 	SysPrintf(_("Cheats saved to: %s\n"), filename);
 }
 
-#ifdef PORTANDROID
-// Revert all enabled cheats
-void RevertCheats(void)
-{
-	int		i, j, k, endindex;
-	int		was_enabled;
-
-	for (i = 0; i < NumCheats; i++) {
-	
-		if(!(Cheats[i].Enabled && Cheats[i].WasEnabled)){
-			continue;
-		}
-
-		// process all cheat codes
-		endindex = Cheats[i].First + Cheats[i].n;
-
-		for (j = Cheats[i].First; j < endindex; j++) {
-			u8		type = (uint8_t)(CheatCodes[j].Addr >> 24);
-			u32		addr = (CheatCodes[j].Addr & 0x001FFFFF);
-			u16		val = CheatCodes[j].Val;
-			u32		taddr;
-
-			//Skip unrevertable command
-			if (type != CHEAT_CONST16 && type != CHEAT_CONST8){
-				continue;
-			}
-			
-			//Get olv value
-			val = CheatCodes[j].OldVal;
-
-			switch (type) {
-				case CHEAT_CONST8:
-					psxMu8ref(addr) = (u8)val;
-					break;
-
-				case CHEAT_CONST16:
-					psxMu16ref(addr) = SWAPu16(val);
-					break;
-			}
-		}
-	}
-}
-
-#endif
-
 // apply all enabled cheats
 void ApplyCheats() {
 	int		i, j, k, endindex;
@@ -270,6 +227,10 @@ void ApplyCheats() {
 
 				case CHEAT_CONST16:
 					psxMu16ref(addr) = SWAPu16(val);
+					break;
+
+				case CHEAT_SCRATCHPAD16: // 1F
+					psxHs16ref(addr) = SWAPu16(val);
 					break;
 
 				case CHEAT_INC16:
@@ -363,6 +324,20 @@ void ApplyCheats() {
 					if (PSXMu16(addr) <= val)
 						j++; // skip the next code
 					break;
+
+				case CHEAT_BUTTONS1_16: { // D4
+					u16 keys = in_keystate[0];
+					keys = (keys << 8) | (keys >> 8);
+					if (keys != val)
+						j++; // skip the next code
+					break;
+				}
+
+				default:
+					SysPrintf("unhandled cheat %d,%d code %08X\n",
+						i, j, CheatCodes[j].Addr);
+					Cheats[i].WasEnabled = Cheats[i].Enabled = 0;
+					break;
 			}
 		}
 	}
@@ -385,7 +360,6 @@ int AddCheat(const char *descr, char *code) {
 		}
 	}
 
-	Cheats[NumCheats].Descr = strdup(descr[0] ? descr : _("(Untitled)"));
 #ifdef PORTANDROID	
 	//Only enabled cheat will be added in ClassicBoy
 	Cheats[NumCheats].Enabled = 1;
@@ -400,7 +374,7 @@ int AddCheat(const char *descr, char *code) {
 	p2 = code;
 
 	while (c) {
-		unsigned int t1, t2;
+		unsigned int t1, t2, r;
 
 		#ifdef PORTANDROID
 		while (*p2 != ',' && *p2 != '\0')
@@ -417,9 +391,11 @@ int AddCheat(const char *descr, char *code) {
 
 		t1 = 0;
 		t2 = 0;
-		sscanf(p1, "%x %x", &t1, &t2);
+		r = sscanf(p1, "%x %x", &t1, &t2);
 
-		if (t1 > 0x10000000) {
+		if (r != 2)
+			SysPrintf("cheat %d: couldn't parse '%s'\n", NumCodes, p1);
+		else if (t1 >= 0x10000000) {
 			if (NumCodes >= NumCodesAllocated) {
 				NumCodesAllocated += ALLOC_INCREMENT;
 
@@ -446,6 +422,7 @@ int AddCheat(const char *descr, char *code) {
 		return -1;
 	}
 
+	Cheats[NumCheats].Descr = strdup(descr[0] ? descr : _("(Untitled)"));
 	NumCheats++;
 	return 0;
 }
@@ -454,6 +431,7 @@ void RemoveCheat(int index) {
 	assert(index >= 0 && index < NumCheats);
 
 	free(Cheats[index].Descr);
+	Cheats[index].Descr = NULL;
 
 	while (index < NumCheats - 1) {
 		Cheats[index] = Cheats[index + 1];

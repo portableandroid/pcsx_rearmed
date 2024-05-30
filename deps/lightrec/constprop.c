@@ -243,12 +243,13 @@ static void lightrec_propagate_slt(u32 rs, u32 rd, bool is_signed,
 	}
 }
 
-void lightrec_consts_propagate(const struct opcode *list,
+void lightrec_consts_propagate(const struct block *block,
 			       unsigned int idx,
 			       struct constprop_data *v)
 {
+	const struct opcode *list = block->opcode_list;
 	union code c;
-	u32 imm;
+	u32 imm, flags;
 
 	if (idx == 0)
 		return;
@@ -263,8 +264,13 @@ void lightrec_consts_propagate(const struct opcode *list,
 		return;
 	}
 
-	if (idx > 1 && !op_flag_sync(list[idx - 1].flags)) {
-		c = list[idx - 2].c;
+	flags = list[idx - 1].flags;
+
+	if (idx > 1 && !op_flag_sync(flags)) {
+		if (op_flag_no_ds(flags))
+			c = list[idx - 1].c;
+		else
+			c = list[idx - 2].c;
 
 		switch (c.i.op) {
 		case OP_BNE:
@@ -323,14 +329,15 @@ void lightrec_consts_propagate(const struct opcode *list,
 		case OP_SPECIAL_SRL:
 			v[c.r.rd].value = v[c.r.rt].value >> c.r.imm;
 			v[c.r.rd].known = (v[c.r.rt].known >> c.r.imm)
-				| (BIT(c.r.imm) - 1 << 32 - c.r.imm);
+				| ((BIT(c.r.imm) - 1) << (32 - c.r.imm));
 			v[c.r.rd].sign = c.r.imm ? 0 : v[c.r.rt].sign;
 			break;
 
 		case OP_SPECIAL_SRA:
 			v[c.r.rd].value = (s32)v[c.r.rt].value >> c.r.imm;
+			v[c.r.rd].sign = (s32)(v[c.r.rt].sign
+					       | (~v[c.r.rt].known & 0x80000000)) >> c.r.imm;
 			v[c.r.rd].known = (s32)v[c.r.rt].known >> c.r.imm;
-			v[c.r.rd].sign = (s32)v[c.r.rt].sign >> c.r.imm;
 			break;
 
 		case OP_SPECIAL_SLLV:
@@ -351,7 +358,7 @@ void lightrec_consts_propagate(const struct opcode *list,
 				imm = v[c.r.rs].value & 0x1f;
 				v[c.r.rd].value = v[c.r.rt].value >> imm;
 				v[c.r.rd].known = (v[c.r.rt].known >> imm)
-					| (BIT(imm) - 1 << 32 - imm);
+					| ((BIT(imm) - 1) << (32 - imm));
 				if (imm)
 					v[c.r.rd].sign = 0;
 			} else {
@@ -364,8 +371,9 @@ void lightrec_consts_propagate(const struct opcode *list,
 			if ((v[c.r.rs].known & 0x1f) == 0x1f) {
 				imm = v[c.r.rs].value & 0x1f;
 				v[c.r.rd].value = (s32)v[c.r.rt].value >> imm;
+				v[c.r.rd].sign = (s32)(v[c.r.rt].sign
+						       | (~v[c.r.rt].known & 0x80000000)) >> imm;
 				v[c.r.rd].known = (s32)v[c.r.rt].known >> imm;
-				v[c.r.rd].sign = (s32)v[c.r.rt].sign >> imm;
 			} else {
 				v[c.r.rd].known = 0;
 				v[c.r.rd].sign = 0;
@@ -449,6 +457,13 @@ void lightrec_consts_propagate(const struct opcode *list,
 			v[c.r.rd].known = 0;
 			v[c.r.rd].sign = 0;
 			break;
+
+		case OP_SPECIAL_JALR:
+			v[c.r.rd].known = 0xffffffff;
+			v[c.r.rd].sign = 0;
+			v[c.r.rd].value = block->pc + ((idx + 2) << 2);
+			break;
+
 		default:
 			break;
 		}
@@ -471,18 +486,18 @@ void lightrec_consts_propagate(const struct opcode *list,
 
 		if (OPT_FLAG_MULT_DIV && c.r.imm) {
 			if (c.r.op >= 32) {
-				v[c.r.imm].value = v[c.r.rs].value << c.r.op - 32;
-				v[c.r.imm].known = (v[c.r.rs].known << c.r.op - 32)
+				v[c.r.imm].value = v[c.r.rs].value << (c.r.op - 32);
+				v[c.r.imm].known = (v[c.r.rs].known << (c.r.op - 32))
 					| (BIT(c.r.op - 32) - 1);
-				v[c.r.imm].sign = v[c.r.rs].sign << c.r.op - 32;
+				v[c.r.imm].sign = v[c.r.rs].sign << (c.r.op - 32);
 			} else if (c.i.op == OP_META_MULT2) {
-				v[c.r.imm].value = (s32)v[c.r.rs].value >> 32 - c.r.op;
-				v[c.r.imm].known = (s32)v[c.r.rs].known >> 32 - c.r.op;
-				v[c.r.imm].sign = (s32)v[c.r.rs].sign >> 32 - c.r.op;
+				v[c.r.imm].value = (s32)v[c.r.rs].value >> (32 - c.r.op);
+				v[c.r.imm].known = (s32)v[c.r.rs].known >> (32 - c.r.op);
+				v[c.r.imm].sign = (s32)v[c.r.rs].sign >> (32 - c.r.op);
 			} else {
-				v[c.r.imm].value = v[c.r.rs].value >> 32 - c.r.op;
-				v[c.r.imm].known = v[c.r.rs].known >> 32 - c.r.op;
-				v[c.r.imm].sign = v[c.r.rs].sign >> 32 - c.r.op;
+				v[c.r.imm].value = v[c.r.rs].value >> (32 - c.r.op);
+				v[c.r.imm].known = v[c.r.rs].known >> (32 - c.r.op);
+				v[c.r.imm].sign = v[c.r.rs].sign >> (32 - c.r.op);
 			}
 		}
 		break;
@@ -644,37 +659,56 @@ void lightrec_consts_propagate(const struct opcode *list,
 				imm = imm ? GENMASK(31, 32 - imm) : 0;
 				v[c.i.rt].sign = 0;
 			}
-			v[c.i.rt].known &= ~imm;
+			v[c.i.rt].known &= imm;
 			break;
 		}
 		fallthrough;
 	case OP_LW:
+	case OP_META_LWU:
 		v[c.i.rt].known = 0;
 		v[c.i.rt].sign = 0;
 		break;
-	case OP_META_MOV:
-		v[c.r.rd] = v[c.r.rs];
-		break;
-	case OP_META_EXTC:
-		v[c.i.rt].value = (s32)(s8)v[c.i.rs].value;
-		if (v[c.i.rs].known & BIT(7)) {
-			v[c.i.rt].known = v[c.i.rs].known | 0xffffff00;
-			v[c.i.rt].sign = 0;
-		} else {
-			v[c.i.rt].known = v[c.i.rs].known & 0x7f;
-			v[c.i.rt].sign = 0xffffff80;
-		}
-		break;
+	case OP_META:
+		switch (c.m.op) {
+		case OP_META_MOV:
+			v[c.m.rd] = v[c.m.rs];
+			break;
 
-	case OP_META_EXTS:
-		v[c.i.rt].value = (s32)(s16)v[c.i.rs].value;
-		if (v[c.i.rs].known & BIT(15)) {
-			v[c.i.rt].known = v[c.i.rs].known | 0xffff0000;
-			v[c.i.rt].sign = 0;
-		} else {
-			v[c.i.rt].known = v[c.i.rs].known & 0x7fff;
-			v[c.i.rt].sign = 0xffff8000;
+		case OP_META_EXTC:
+			v[c.m.rd].value = (s32)(s8)v[c.m.rs].value;
+			if (v[c.m.rs].known & BIT(7)) {
+				v[c.m.rd].known = v[c.m.rs].known | 0xffffff00;
+				v[c.m.rd].sign = 0;
+			} else {
+				v[c.m.rd].known = v[c.m.rs].known & 0x7f;
+				v[c.m.rd].sign = 0xffffff80;
+			}
+			break;
+
+		case OP_META_EXTS:
+			v[c.m.rd].value = (s32)(s16)v[c.m.rs].value;
+			if (v[c.m.rs].known & BIT(15)) {
+				v[c.m.rd].known = v[c.m.rs].known | 0xffff0000;
+				v[c.m.rd].sign = 0;
+			} else {
+				v[c.m.rd].known = v[c.m.rs].known & 0x7fff;
+				v[c.m.rd].sign = 0xffff8000;
+			}
+			break;
+
+		case OP_META_COM:
+			v[c.m.rd].known = v[c.m.rs].known;
+			v[c.m.rd].value = ~v[c.m.rs].value;
+			v[c.m.rd].sign = v[c.m.rs].sign;
+			break;
+		default:
+			break;
 		}
+		break;
+	case OP_JAL:
+		v[31].known = 0xffffffff;
+		v[31].sign = 0;
+		v[31].value = block->pc + ((idx + 2) << 2);
 		break;
 
 	default:

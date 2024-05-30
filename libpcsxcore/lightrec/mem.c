@@ -3,9 +3,12 @@
  * Copyright (C) 2022 Paul Cercueil <paul@crapouillou.net>
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,8 +34,6 @@
 #define MFD_HUGETLB 0x0004
 #endif
 
-void *code_buffer;
-
 static const uintptr_t supported_io_bases[] = {
 	0x0,
 	0x10000000,
@@ -50,13 +51,19 @@ static void * mmap_huge(void *addr, size_t length, int prot, int flags,
 			   flags | MAP_HUGETLB | (21 << MAP_HUGE_SHIFT),
 			   fd, offset);
 		if (map != MAP_FAILED)
-			printf("Hugetlb mmap to address 0x%lx succeeded\n", (uintptr_t) addr);
+			printf("Hugetlb mmap to address 0x%" PRIxPTR " succeeded\n",
+			       (uintptr_t) addr);
 	}
 
 	if (map == MAP_FAILED) {
 		map = mmap(addr, length, prot, flags, fd, offset);
-		if (map != MAP_FAILED)
-			printf("Regular mmap to address 0x%lx succeeded\n", (uintptr_t) addr);
+		if (map != MAP_FAILED) {
+			printf("Regular mmap to address 0x%" PRIxPTR " succeeded\n",
+			       (uintptr_t) addr);
+#ifdef MADV_HUGEPAGE
+			madvise(map, length, MADV_HUGEPAGE);
+#endif
+		}
 	}
 
 	return map;
@@ -91,11 +98,16 @@ static int lightrec_mmap_ram(bool hugetlb)
 		base = supported_io_bases[i];
 
 		for (j = 0; j < 4; j++) {
-			map = mmap_huge((void *)(base + j * 0x200000),
-					0x200000, PROT_READ | PROT_WRITE,
-					MAP_SHARED | MAP_FIXED, memfd, 0);
+			void *base_ptr = (void *)(base + j * 0x200000);
+			map = mmap_huge(base_ptr, 0x200000, PROT_READ | PROT_WRITE,
+					MAP_SHARED | MAP_FIXED_NOREPLACE, memfd, 0);
 			if (map == MAP_FAILED)
 				break;
+			// some systems ignore MAP_FIXED_NOREPLACE
+			if (map != base_ptr) {
+				munmap(map, 0x200000);
+				break;
+			}
 		}
 
 		/* Impossible to map using this base */
@@ -142,7 +154,7 @@ int lightrec_init_mmap(void)
 
 	map = mmap((void *)(base + 0x1f000000), 0x10000,
 		   PROT_READ | PROT_WRITE,
-		   MAP_PRIVATE | MAP_FIXED_NOREPLACE | MAP_ANONYMOUS, 0, 0);
+		   MAP_PRIVATE | MAP_FIXED_NOREPLACE | MAP_ANONYMOUS, -1, 0);
 	if (map == MAP_FAILED) {
 		err = -EINVAL;
 		fprintf(stderr, "Unable to mmap parallel port\n");
@@ -153,7 +165,7 @@ int lightrec_init_mmap(void)
 
 	map = mmap_huge((void *)(base + 0x1fc00000), 0x200000,
 			PROT_READ | PROT_WRITE,
-			MAP_PRIVATE | MAP_FIXED_NOREPLACE | MAP_ANONYMOUS, 0, 0);
+			MAP_PRIVATE | MAP_FIXED_NOREPLACE | MAP_ANONYMOUS, -1, 0);
 	if (map == MAP_FAILED) {
 		err = -EINVAL;
 		fprintf(stderr, "Unable to mmap BIOS\n");
@@ -176,7 +188,7 @@ int lightrec_init_mmap(void)
 	map = mmap_huge((void *)(base + 0x800000), CODE_BUFFER_SIZE,
 			PROT_EXEC | PROT_READ | PROT_WRITE,
 			MAP_PRIVATE | MAP_FIXED_NOREPLACE | MAP_ANONYMOUS,
-			0, 0);
+			-1, 0);
 	if (map == MAP_FAILED) {
 		err = -EINVAL;
 		fprintf(stderr, "Unable to mmap code buffer\n");

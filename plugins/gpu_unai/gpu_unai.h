@@ -53,26 +53,76 @@
 #define u32 uint32_t
 #define s32 int32_t
 #define s64 int64_t
+#define u64 uint64_t
+
+typedef union {
+	struct {
+		u16 r, g, b;
+	} c;
+	u64 raw;
+} gcol_t;
+
+typedef struct {
+        u32 v;
+} le32_t;
+
+typedef struct {
+        u16 v;
+} le16_t;
+
+static inline u32 le32_to_u32(le32_t le)
+{
+        return LE32TOH(le.v);
+}
+
+static inline s32 le32_to_s32(le32_t le)
+{
+        return (int32_t) LE32TOH(le.v);
+}
+
+static inline u32 le32_raw(le32_t le)
+{
+	return le.v;
+}
+
+static inline le32_t u32_to_le32(u32 u)
+{
+	return (le32_t){ .v = HTOLE32(u) };
+}
+
+static inline u16 le16_to_u16(le16_t le)
+{
+        return LE16TOH(le.v);
+}
+
+static inline s16 le16_to_s16(le16_t le)
+{
+        return (int16_t) LE16TOH(le.v);
+}
+
+static inline u16 le16_raw(le16_t le)
+{
+	return le.v;
+}
+
+static inline le16_t u16_to_le16(u16 u)
+{
+	return (le16_t){ .v = HTOLE16(u) };
+}
 
 union PtrUnion
 {
-	u32  *U4;
-	s32  *S4;
-	u16  *U2;
-	s16  *S2;
+	le32_t  *U4;
+	le16_t  *U2;
 	u8   *U1;
-	s8   *S1;
 	void *ptr;
 };
 
 union GPUPacket
 {
-	u32 U4[16];
-	s32 S4[16];
-	u16 U2[32];
-	s16 S2[32];
+	le32_t U4[16];
+	le16_t U2[32];
 	u8  U1[64];
-	s8  S1[64];
 };
 
 template<class T> static inline void SwapValues(T &x, T &y)
@@ -136,10 +186,10 @@ static inline s32 GPU_DIV(s32 rs, s32 rt)
 struct gpu_unai_t {
 	u32 GPU_GP1;
 	GPUPacket PacketBuffer;
-	u16 *vram;
+	le16_t *vram;
 
 #ifdef USE_GPULIB
-	u16 *downscale_vram;
+	le16_t *downscale_vram;
 #endif
 	////////////////////////////////////////////////////////////////////////////
 	// Variables used only by older standalone version of gpu_unai (gpu.cpp)
@@ -164,7 +214,7 @@ struct gpu_unai_t {
 	struct {
 		s32  px,py;
 		s32  x_end,y_end;
-		u16* pvram;
+		le16_t* pvram;
 		u32 *last_dma;     // Last dma pointer
 		bool FrameToRead;  // Load image in progress
 		bool FrameToWrite; // Store image in progress
@@ -197,8 +247,8 @@ struct gpu_unai_t {
 	s16 DrawingOffset[2];  // [0] : Drawing offset X (signed)
 	                       // [1] : Drawing offset Y (signed)
 
-	u16* TBA;              // Ptr to current texture in VRAM
-	u16* CBA;              // Ptr to current CLUT in VRAM
+	le16_t* TBA;              // Ptr to current texture in VRAM
+	le16_t* CBA;              // Ptr to current CLUT in VRAM
 
 	////////////////////////////////////////////////////////////////////////////
 	//  Inner Loop parameters
@@ -211,11 +261,12 @@ struct gpu_unai_t {
 	s32 u_inc, v_inc;
 
 	// Color for Gouraud-shaded prims
+	// Fixed-pt 8.8 rgb triplet
 	// Packed fixed-pt 8.3:8.3:8.2 rgb triplet
-	//  layout:  rrrrrrrrXXXggggggggXXXbbbbbbbbXX
-	//           ^ bit 31                       ^ bit 0
-	u32 gCol;
-	u32 gInc;          // Increment along scanline for gCol
+	//  layout:  ccccccccXXXXXXXX for c in [r, g, b]
+	//           ^ bit 16
+	gcol_t gCol;
+	gcol_t gInc;       // Increment along scanline for gCol
 
 	// Color for flat-shaded, texture-blended prims
 	u8  r5, g5, b5;    // 5-bit light for undithered prims

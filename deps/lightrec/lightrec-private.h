@@ -20,6 +20,11 @@
 #include <immintrin.h>
 #endif
 
+#include <inttypes.h>
+#include <stdint.h>
+
+#define PC_FMT "PC 0x%08"PRIx32
+
 #define ARRAY_SIZE(x) (sizeof(x) ? sizeof(x) / sizeof((x)[0]) : 0)
 
 #define GENMASK(h, l) \
@@ -51,7 +56,11 @@
 #define SET_DEFAULT_ELM(table, value) [0] = NULL
 #endif
 
-#define fallthrough do {} while (0) /* fall-through */
+#if __has_attribute(__fallthrough__)
+#	define fallthrough	__attribute__((__fallthrough__))
+#else
+#	define fallthrough	do {} while (0)  /* fallthrough */
+#endif
 
 #define container_of(ptr, type, member) \
 	((type *)((void *)(ptr) - offsetof(type, member)))
@@ -73,6 +82,7 @@
 #define BLOCK_IS_DEAD		BIT(3)
 #define BLOCK_IS_MEMSET		BIT(4)
 #define BLOCK_NO_OPCODE_LIST	BIT(5)
+#define BLOCK_PRELOAD_PC	BIT(6)
 
 #define RAM_SIZE	0x200000
 #define BIOS_SIZE	0x80000
@@ -81,7 +91,7 @@
 
 #define REG_LO 32
 #define REG_HI 33
-#define REG_CP2_TEMP (offsetof(struct lightrec_state, cp2_temp_reg) / sizeof(u32))
+#define REG_TEMP (offsetof(struct lightrec_state, temp_reg) / sizeof(u32))
 
 /* Definition of jit_state_t (avoids inclusion of <lightning.h>) */
 struct jit_node;
@@ -144,22 +154,28 @@ struct lightrec_cstate {
 
 	struct lightrec_branch local_branches[512];
 	struct lightrec_branch_target targets[512];
+	u16 movi_temp[32];
 	unsigned int nb_local_branches;
 	unsigned int nb_targets;
 	unsigned int cycles;
 
 	struct regcache *reg_cache;
+
+	_Bool no_load_delay;
 };
 
 struct lightrec_state {
 	struct lightrec_registers regs;
-	u32 cp2_temp_reg;
+	u32 temp_reg;
+	u32 curr_pc;
 	u32 next_pc;
 	uintptr_t wrapper_regs[NUM_TEMPS];
+	u8 in_delay_slot_n;
 	u32 current_cycle;
 	u32 target_cycle;
 	u32 exit_flags;
 	u32 old_cycle_counter;
+	u32 cycles_per_op;
 	struct block *dispatcher, *c_wrapper_block;
 	void *c_wrappers[C_WRAPPERS_COUNT];
 	void *wrappers_eps[C_WRAPPERS_COUNT];
@@ -169,22 +185,24 @@ struct lightrec_state {
 	struct reaper *reaper;
 	void *tlsf;
 	void (*eob_wrapper_func)(void);
+	void (*interpreter_func)(void);
+	void (*ds_check_func)(void);
 	void (*memset_func)(void);
 	void (*get_next_block)(void);
 	struct lightrec_ops ops;
 	unsigned int nb_precompile;
+	unsigned int nb_compile;
 	unsigned int nb_maps;
 	const struct lightrec_mem_map *maps;
 	uintptr_t offset_ram, offset_bios, offset_scratch, offset_io;
+	u32 opt_flags;
 	_Bool with_32bit_lut;
 	_Bool mirrors_mapped;
-	_Bool invalidate_from_dma_only;
 	void *code_lut[];
 };
 
-u32 lightrec_rw(struct lightrec_state *state, union code op,
-		u32 addr, u32 data, u32 *flags,
-		struct block *block);
+u32 lightrec_rw(struct lightrec_state *state, union code op, u32 addr,
+		u32 data, u32 *flags, struct block *block, u16 offset);
 
 void lightrec_free_block(struct lightrec_state *state, struct block *block);
 
@@ -259,7 +277,7 @@ static inline u32 get_ds_pc(const struct block *block, u16 offset, s16 imm)
 
 	offset += op_flag_no_ds(flags);
 
-	return block->pc + (offset + imm << 2);
+	return block->pc + ((offset + imm) << 2);
 }
 
 static inline u32 get_branch_pc(const struct block *block, u16 offset, s16 imm)
@@ -268,7 +286,7 @@ static inline u32 get_branch_pc(const struct block *block, u16 offset, s16 imm)
 
 	offset -= op_flag_no_ds(flags);
 
-	return block->pc + (offset + imm << 2);
+	return block->pc + ((offset + imm) << 2);
 }
 
 void lightrec_mtc(struct lightrec_state *state, union code op, u8 reg, u32 data);
@@ -285,7 +303,8 @@ int lightrec_compile_block(struct lightrec_cstate *cstate, struct block *block);
 void lightrec_free_opcode_list(struct lightrec_state *state,
 			       struct opcode *list);
 
-unsigned int lightrec_cycles_of_opcode(union code code);
+unsigned int lightrec_cycles_of_opcode(const struct lightrec_state *state,
+				       union code code);
 
 static inline u8 get_mult_div_lo(union code c)
 {
@@ -341,12 +360,23 @@ static inline u8 block_clear_flags(struct block *block, u8 mask)
 
 static inline _Bool can_sign_extend(s32 value, u8 order)
 {
-      return (u32)(value >> order - 1) + 1 < 2;
+      return ((u32)(value >> (order - 1)) + 1) < 2;
 }
 
 static inline _Bool can_zero_extend(u32 value, u8 order)
 {
       return (value >> order) == 0;
+}
+
+static inline const struct opcode *
+get_delay_slot(const struct opcode *list, u16 i)
+{
+	return op_flag_no_ds(list[i].flags) ? &list[i - 1] : &list[i + 1];
+}
+
+static inline _Bool lightrec_store_next_pc(void)
+{
+	return NUM_REGS + NUM_TEMPS <= 4;
 }
 
 #endif /* __LIGHTREC_PRIVATE_H__ */

@@ -24,11 +24,12 @@
 extern "C" {
 #endif
 
-int  real_do_cmd_list(uint32_t *list, int count, int *last_cmd);
+int  real_do_cmd_list(uint32_t *list, int count,
+	       int *cycles_sum_out, int *cycles_last, int *last_cmd);
 int  real_renderer_init(void);
 void real_renderer_finish(void);
 void real_renderer_sync_ecmds(uint32_t * ecmds);
-void real_renderer_update_caches(int x, int y, int w, int h);
+void real_renderer_update_caches(int x, int y, int w, int h, int state_changed);
 void real_renderer_flush_queues(void);
 void real_renderer_set_interlace(int enable, int is_odd);
 void real_renderer_set_config(const struct rearmed_cbs *config);

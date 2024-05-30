@@ -27,13 +27,13 @@
 #ifdef __MACH__
 #define dynarec_local		ESYM(dynarec_local)
 #define ndrc_add_jump_out	ESYM(ndrc_add_jump_out)
-#define ndrc_try_restore_block	ESYM(ndrc_try_restore_block)
 #define ndrc_get_addr_ht	ESYM(ndrc_get_addr_ht)
 #define ndrc_get_addr_ht_param	ESYM(ndrc_get_addr_ht_param)
 #define ndrc_write_invalidate_one ESYM(ndrc_write_invalidate_one)
 #define gen_interupt		ESYM(gen_interupt)
 #define gteCheckStallRaw	ESYM(gteCheckStallRaw)
 #define psxException		ESYM(psxException)
+#define execI			ESYM(execI)
 #endif
 
 	.bss
@@ -239,9 +239,9 @@ FUNCTION(cc_interrupt):
 	add	r10, r0, r10
 	str	r1, [fp, #LO_pending_exception]
 	str	r10, [fp, #LO_cycle]		/* PCSX cycles */
-@@	str	r10, [fp, #LO_reg_cop0+36]	/* Count - not on PSX */
 	mov	r10, lr
 
+	add	r0, fp, #LO_reg_cop0            /* CP0 */
 	bl	gen_interupt
 	mov	lr, r10
 	ldr	r10, [fp, #LO_cycle]
@@ -260,58 +260,57 @@ FUNCTION(cc_interrupt):
 	.size	cc_interrupt, .-cc_interrupt
 
 	.align	2
-FUNCTION(fp_exception):
-	mov	r2, #0x10000000
-.E7:
-	ldr	r1, [fp, #LO_reg_cop0+48] /* Status */
-	mov	r3, #0x80000000
-	str	r0, [fp, #LO_reg_cop0+56] /* EPC */
-	orr	r1, #2
-	add	r2, r2, #0x2c
-	str	r1, [fp, #LO_reg_cop0+48] /* Status */
-	str	r2, [fp, #LO_reg_cop0+52] /* Cause */
-	add	r0, r3, #0x80
-	bl	ndrc_get_addr_ht
-	mov	pc, r0
-	.size	fp_exception, .-fp_exception
-	.align	2
-FUNCTION(fp_exception_ds):
-	mov	r2, #0x90000000 /* Set high bit if delay slot */
-	b	.E7
-	.size	fp_exception_ds, .-fp_exception_ds
-
-	.align	2
+FUNCTION(jump_addrerror_ds): /* R3000E_AdEL / R3000E_AdES in r0 */
+	str	r1, [fp, #(LO_psxRegs + (34+8)*4)]  /* BadVaddr */
+	mov	r1, #1
+	b	call_psxException
+FUNCTION(jump_addrerror):
+	str	r1, [fp, #(LO_psxRegs + (34+8)*4)]  /* BadVaddr */
+	mov	r1, #0
+	b	call_psxException
+FUNCTION(jump_overflow_ds):
+	mov	r0, #(12<<2)  /* R3000E_Ov */
+	mov	r1, #1
+	b	call_psxException
+FUNCTION(jump_overflow):
+	mov	r0, #(12<<2)
+	mov	r1, #0
+	b	call_psxException
 FUNCTION(jump_break_ds):
-	mov	r0, #0x24
+	mov	r0, #(9<<2)  /* R3000E_Bp */
 	mov	r1, #1
 	b	call_psxException
 FUNCTION(jump_break):
-	mov	r0, #0x24
+	mov	r0, #(9<<2)
 	mov	r1, #0
 	b	call_psxException
 FUNCTION(jump_syscall_ds):
-	mov	r0, #0x20
-	mov	r1, #1
+	mov	r0, #(8<<2)  /* R3000E_Syscall */
+	mov	r1, #2
 	b	call_psxException
 FUNCTION(jump_syscall):
-	mov	r0, #0x20
+	mov	r0, #(8<<2)
 	mov	r1, #0
 
 call_psxException:
 	ldr	r3, [fp, #LO_last_count]
 	str	r2, [fp, #LO_pcaddr]
 	add	r10, r3, r10
-	str	r10, [fp, #LO_cycle]		/* PCSX cycles */
+	str	r10, [fp, #LO_cycle]            /* PCSX cycles */
+	add	r2, fp, #LO_reg_cop0            /* CP0 */
 	bl	psxException
 
 	/* note: psxException might do recursive recompiler call from it's HLE code,
 	 * so be ready for this */
 FUNCTION(jump_to_new_pc):
+	ldr	r2, [fp, #LO_stop]
 	ldr	r1, [fp, #LO_next_interupt]
 	ldr	r10, [fp, #LO_cycle]
 	ldr	r0, [fp, #LO_pcaddr]
-	sub	r10, r10, r1
+	tst	r2, r2
 	str	r1, [fp, #LO_last_count]
+	sub	r10, r10, r1
+	bne	new_dyna_leave
 	bl	ndrc_get_addr_ht
 	mov	pc, r0
 	.size	jump_to_new_pc, .-jump_to_new_pc
@@ -319,7 +318,6 @@ FUNCTION(jump_to_new_pc):
 	.align	2
 FUNCTION(new_dyna_leave):
 	ldr	r0, [fp, #LO_last_count]
-	add	r12, fp, #28
 	add	r10, r0, r10
 	str	r10, [fp, #LO_cycle]
 	ldmfd	sp!, {r4, r5, r6, r7, r8, r9, sl, fp, ip, pc}
@@ -421,15 +419,23 @@ FUNCTION(new_dyna_start):
 
 /* --------------------------------------- */
 
-.align	2
+.macro memhandler_post
+	/* r2 = cycles_out, r3 = tmp */
+	ldr	r3, [fp, #LO_next_interupt]
+	ldr	r2, [fp, #LO_cycle]        @ memhandlers can modify cc, like dma
+	str	r3, [fp, #LO_last_count]
+	sub	r2, r2, r3
+.endm
 
-.macro pcsx_read_mem readop tab_shift
+.align 2
+
+.macro pcsx_read_mem_part readop tab_shift
 	/* r0 = address, r1 = handler_tab, r2 = cycles */
 	lsl	r3, r0, #20
 	lsr	r3, #(20+\tab_shift)
 	ldr	r12, [fp, #LO_last_count]
 	ldr	r1, [r1, r3, lsl #2]
-	add	r2, r2, r12
+	add	r12, r2, r12
 	lsls	r1, #1
 .if \tab_shift == 1
 	lsl	r3, #1
@@ -438,28 +444,30 @@ FUNCTION(new_dyna_start):
 	\readop	r0, [r1, r3, lsl #\tab_shift]
 .endif
 	movcc	pc, lr
-	str	r2, [fp, #LO_cycle]
-	bx	r1
+	mov	r2, r12
+	str	r12, [fp, #LO_cycle]
 .endm
 
 FUNCTION(jump_handler_read8):
 	add     r1, #0x1000/4*4 + 0x1000/2*4 @ shift to r8 part
-	pcsx_read_mem ldrbcc, 0
+	pcsx_read_mem_part ldrbcc, 0
+	bx	r1                           @ addr, unused, cycles
 
 FUNCTION(jump_handler_read16):
 	add     r1, #0x1000/4*4              @ shift to r16 part
-	pcsx_read_mem ldrhcc, 1
+	pcsx_read_mem_part ldrhcc, 1
+	bx	r1                           @ addr, unused, cycles
 
 FUNCTION(jump_handler_read32):
-	pcsx_read_mem ldrcc, 2
-
-
-.macro memhandler_post
-	ldr	r0, [fp, #LO_next_interupt]
-	ldr	r2, [fp, #LO_cycle]        @ memhandlers can modify cc, like dma
-	str	r0, [fp, #LO_last_count]
-	sub	r0, r2, r0
-.endm
+	pcsx_read_mem_part ldrcc, 2
+	bx	r1                           @ addr, unused, cycles
+#if 0
+	str	lr, [fp, #LO_saved_lr]
+	blx	r1
+	ldr	lr, [fp, #LO_saved_lr]
+	memhandler_post
+	bx	lr
+#endif
 
 .macro pcsx_write_mem wrtop tab_shift
 	/* r0 = address, r1 = data, r2 = cycles, r3 = handler_tab */
@@ -468,7 +476,6 @@ FUNCTION(jump_handler_read32):
 	ldr	r3, [r3, r12, lsl #2]
 	str	r0, [fp, #LO_address]      @ some handlers still need it..
 	lsls	r3, #1
-	mov     r0, r2                     @ cycle return in case of direct store
 .if \tab_shift == 1
 	lsl	r12, #1
 	\wrtop	r1, [r3, r12]
@@ -521,7 +528,7 @@ FUNCTION(jump_handle_swl):
 	mov	r12,r0,lsr #12
 	ldr	r3, [r3, r12, lsl #2]
 	lsls	r3, #1
-	bcs	4f
+	bcs	jump_handle_swx_interp
 	add	r3, r0, r3
 	mov	r0, r2
 	tst	r3, #2
@@ -544,11 +551,6 @@ FUNCTION(jump_handle_swl):
 	strhne	r1, [r3, #-1]
 	strbeq	r12, [r3]
 	bx	lr
-4:
-	mov	r0, r2
-@	b	abort
-	bx	lr		@ TODO?
-
 
 FUNCTION(jump_handle_swr):
 	/* r0 = address, r1 = data, r2 = cycles */
@@ -556,7 +558,7 @@ FUNCTION(jump_handle_swr):
 	mov	r12,r0,lsr #12
 	ldr	r3, [r3, r12, lsl #2]
 	lsls	r3, #1
-	bcs	4f
+	bcs	jump_handle_swx_interp
 	add	r3, r0, r3
 	and	r12,r3, #3
 	mov	r0, r2
@@ -570,11 +572,14 @@ FUNCTION(jump_handle_swr):
 	strb	r1, [r3]
 	strh	r2, [r3, #1]
 	bx	lr
-4:
-	mov	r0, r2
-@	b	abort
-	bx	lr		@ TODO?
 
+jump_handle_swx_interp: /* almost never happens */
+	ldr	r3, [fp, #LO_last_count]
+	add	r0, fp, #LO_psxRegs
+	add	r2, r3, r2
+	str	r2, [fp, #LO_cycle]           /* PCSX cycles */
+	bl	execI
+	b	jump_to_new_pc
 
 .macro rcntx_read_mode0 num
 	/* r0 = address, r2 = cycles */

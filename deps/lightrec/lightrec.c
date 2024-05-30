@@ -35,21 +35,23 @@ static bool lightrec_block_is_fully_tagged(const struct block *block);
 static void lightrec_mtc2(struct lightrec_state *state, u8 reg, u32 data);
 static u32 lightrec_mfc2(struct lightrec_state *state, u8 reg);
 
-static void lightrec_default_sb(struct lightrec_state *state, u32 opcode,
-				void *host, u32 addr, u8 data)
-{
-	*(u8 *)host = data;
+static void lightrec_reap_block(struct lightrec_state *state, void *data);
 
-	if (!state->invalidate_from_dma_only)
+static void lightrec_default_sb(struct lightrec_state *state, u32 opcode,
+				void *host, u32 addr, u32 data)
+{
+	*(u8 *)host = (u8)data;
+
+	if (!(state->opt_flags & LIGHTREC_OPT_INV_DMA_ONLY))
 		lightrec_invalidate(state, addr, 1);
 }
 
 static void lightrec_default_sh(struct lightrec_state *state, u32 opcode,
-				void *host, u32 addr, u16 data)
+				void *host, u32 addr, u32 data)
 {
-	*(u16 *)host = HTOLE16(data);
+	*(u16 *)host = HTOLE16((u16)data);
 
-	if (!state->invalidate_from_dma_only)
+	if (!(state->opt_flags & LIGHTREC_OPT_INV_DMA_ONLY))
 		lightrec_invalidate(state, addr, 2);
 }
 
@@ -58,7 +60,7 @@ static void lightrec_default_sw(struct lightrec_state *state, u32 opcode,
 {
 	*(u32 *)host = HTOLE32(data);
 
-	if (!state->invalidate_from_dma_only)
+	if (!(state->opt_flags & LIGHTREC_OPT_INV_DMA_ONLY))
 		lightrec_invalidate(state, addr, 4);
 }
 
@@ -80,6 +82,27 @@ static u32 lightrec_default_lw(struct lightrec_state *state,
 	return LE32TOH(*(u32 *)host);
 }
 
+static u32 lightrec_default_lwu(struct lightrec_state *state,
+				u32 opcode, void *host, u32 addr)
+{
+	u32 val;
+
+	memcpy(&val, host, 4);
+
+	return LE32TOH(val);
+}
+
+static void lightrec_default_swu(struct lightrec_state *state, u32 opcode,
+				 void *host, u32 addr, u32 data)
+{
+	data = HTOLE32(data);
+
+	memcpy(host, &data, 4);
+
+	if (!(state->opt_flags & LIGHTREC_OPT_INV_DMA_ONLY))
+		lightrec_invalidate(state, addr & ~0x3, 8);
+}
+
 static const struct lightrec_mem_map_ops lightrec_default_ops = {
 	.sb = lightrec_default_sb,
 	.sh = lightrec_default_sh,
@@ -87,6 +110,8 @@ static const struct lightrec_mem_map_ops lightrec_default_ops = {
 	.lb = lightrec_default_lb,
 	.lh = lightrec_default_lh,
 	.lw = lightrec_default_lw,
+	.lwu = lightrec_default_lwu,
+	.swu = lightrec_default_swu,
 };
 
 static void __segfault_cb(struct lightrec_state *state, u32 addr,
@@ -94,9 +119,9 @@ static void __segfault_cb(struct lightrec_state *state, u32 addr,
 {
 	lightrec_set_exit_flags(state, LIGHTREC_EXIT_SEGFAULT);
 	pr_err("Segmentation fault in recompiled code: invalid "
-	       "load/store at address 0x%08x\n", addr);
+	       "load/store at address "PC_FMT"\n", addr);
 	if (block)
-		pr_err("Was executing block PC 0x%08x\n", block->pc);
+		pr_err("Was executing block "PC_FMT"\n", block->pc);
 }
 
 static void lightrec_swl(struct lightrec_state *state,
@@ -237,26 +262,43 @@ lightrec_get_map(struct lightrec_state *state, void **host, u32 kaddr)
 	return map;
 }
 
-u32 lightrec_rw(struct lightrec_state *state, union code op,
-		u32 addr, u32 data, u32 *flags, struct block *block)
+u32 lightrec_rw(struct lightrec_state *state, union code op, u32 base,
+		u32 data, u32 *flags, struct block *block, u16 offset)
 {
 	const struct lightrec_mem_map *map;
 	const struct lightrec_mem_map_ops *ops;
 	u32 opcode = op.opcode;
+	bool was_tagged = true;
+	u16 old_flags;
+	u32 addr;
 	void *host;
 
-	addr += (s16) op.i.imm;
+	addr = kunseg(base + (s16) op.i.imm);
 
-	map = lightrec_get_map(state, &host, kunseg(addr));
+	map = lightrec_get_map(state, &host, addr);
 	if (!map) {
 		__segfault_cb(state, addr, block);
 		return 0;
 	}
 
+	if (flags)
+		was_tagged = LIGHTREC_FLAGS_GET_IO_MODE(*flags);
 
 	if (likely(!map->ops)) {
-		if (flags && !LIGHTREC_FLAGS_GET_IO_MODE(*flags))
-			*flags |= LIGHTREC_IO_MODE(LIGHTREC_IO_DIRECT);
+		if (flags && !LIGHTREC_FLAGS_GET_IO_MODE(*flags)) {
+			/* Force parallel port accesses as HW accesses, because
+			 * the direct-I/O emitters can't differenciate it. */
+			if (unlikely(map == &state->maps[PSX_MAP_PARALLEL_PORT]))
+				*flags |= LIGHTREC_IO_MODE(LIGHTREC_IO_HW);
+			/* If the base register is 0x0, be extra suspicious.
+			 * Some games (e.g. Sled Storm) actually do segmentation
+			 * faults by using uninitialized pointers, which are
+			 * later initialized to point to hardware registers. */
+			else if (op.i.rs && base == 0x0)
+				*flags |= LIGHTREC_IO_MODE(LIGHTREC_IO_HW);
+			else
+				*flags |= LIGHTREC_IO_MODE(LIGHTREC_IO_DIRECT);
+		}
 
 		ops = &lightrec_default_ops;
 	} else if (flags &&
@@ -269,12 +311,23 @@ u32 lightrec_rw(struct lightrec_state *state, union code op,
 		ops = map->ops;
 	}
 
+	if (!was_tagged) {
+		old_flags = block_set_flags(block, BLOCK_SHOULD_RECOMPILE);
+
+		if (!(old_flags & BLOCK_SHOULD_RECOMPILE)) {
+			pr_debug("Opcode of block at "PC_FMT" has been tagged"
+				 " - flag for recompilation\n", block->pc);
+
+			lut_write(state, lut_offset(block->pc), NULL);
+		}
+	}
+
 	switch (op.i.op) {
 	case OP_SB:
-		ops->sb(state, opcode, host, addr, (u8) data);
+		ops->sb(state, opcode, host, addr, data);
 		return 0;
 	case OP_SH:
-		ops->sh(state, opcode, host, addr, (u16) data);
+		ops->sh(state, opcode, host, addr, data);
 		return 0;
 	case OP_SWL:
 		lightrec_swl(state, ops, opcode, host, addr, data);
@@ -303,6 +356,11 @@ u32 lightrec_rw(struct lightrec_state *state, union code op,
 		return lightrec_lwl(state, ops, opcode, host, addr, data);
 	case OP_LWR:
 		return lightrec_lwr(state, ops, opcode, host, addr, data);
+	case OP_META_LWU:
+		return ops->lwu(state, opcode, host, addr);
+	case OP_META_SWU:
+		ops->swu(state, opcode, host, addr, data);
+		return 0;
 	case OP_LW:
 	default:
 		return ops->lw(state, opcode, host, addr);
@@ -311,10 +369,10 @@ u32 lightrec_rw(struct lightrec_state *state, union code op,
 
 static void lightrec_rw_helper(struct lightrec_state *state,
 			       union code op, u32 *flags,
-			       struct block *block)
+			       struct block *block, u16 offset)
 {
 	u32 ret = lightrec_rw(state, op, state->regs.gpr[op.i.rs],
-			      state->regs.gpr[op.i.rt], flags, block);
+			      state->regs.gpr[op.i.rt], flags, block, offset);
 
 	switch (op.i.op) {
 	case OP_LB:
@@ -324,8 +382,13 @@ static void lightrec_rw_helper(struct lightrec_state *state,
 	case OP_LWL:
 	case OP_LWR:
 	case OP_LW:
-		if (op.i.rt)
+	case OP_META_LWU:
+		if (OPT_HANDLE_LOAD_DELAYS && unlikely(!state->in_delay_slot_n)) {
+			state->temp_reg = ret;
+			state->in_delay_slot_n = 0xff;
+		} else if (op.i.rt) {
 			state->regs.gpr[op.i.rt] = ret;
+		}
 		fallthrough;
 	default:
 		break;
@@ -334,41 +397,26 @@ static void lightrec_rw_helper(struct lightrec_state *state,
 
 static void lightrec_rw_cb(struct lightrec_state *state, u32 arg)
 {
-	lightrec_rw_helper(state, (union code) arg, NULL, NULL);
+	lightrec_rw_helper(state, (union code) arg, NULL, NULL, 0);
 }
 
 static void lightrec_rw_generic_cb(struct lightrec_state *state, u32 arg)
 {
 	struct block *block;
 	struct opcode *op;
-	bool was_tagged;
 	u16 offset = (u16)arg;
-	u16 old_flags;
 
 	block = lightrec_find_block_from_lut(state->block_cache,
-					     arg >> 16, state->next_pc);
+					     arg >> 16, state->curr_pc);
 	if (unlikely(!block)) {
-		pr_err("rw_generic: No block found in LUT for PC 0x%x offset 0x%x\n",
-			 state->next_pc, offset);
+		pr_err("rw_generic: No block found in LUT for "PC_FMT" offset 0x%"PRIx16"\n",
+			 state->curr_pc, offset);
 		lightrec_set_exit_flags(state, LIGHTREC_EXIT_SEGFAULT);
 		return;
 	}
 
 	op = &block->opcode_list[offset];
-	was_tagged = LIGHTREC_FLAGS_GET_IO_MODE(op->flags);
-
-	lightrec_rw_helper(state, op->c, &op->flags, block);
-
-	if (!was_tagged) {
-		old_flags = block_set_flags(block, BLOCK_SHOULD_RECOMPILE);
-
-		if (!(old_flags & BLOCK_SHOULD_RECOMPILE)) {
-			pr_debug("Opcode of block at PC 0x%08x has been tagged"
-				 " - flag for recompilation\n", block->pc);
-
-			lut_write(state, lut_offset(block->pc), NULL);
-		}
-	}
+	lightrec_rw_helper(state, op->c, &op->flags, block, offset);
 }
 
 static u32 clamp_s32(s32 val, s32 min, s32 max)
@@ -462,7 +510,7 @@ static void lightrec_mfc_cb(struct lightrec_state *state, union code op)
 	u32 rt = lightrec_mfc(state, op);
 
 	if (op.i.op == OP_SWC2)
-		state->cp2_temp_reg = rt;
+		state->temp_reg = rt;
 	else if (op.r.rt)
 		state->regs.gpr[op.r.rt] = rt;
 }
@@ -507,7 +555,7 @@ static void lightrec_mtc0(struct lightrec_state *state, u8 reg, u32 data)
 		status = state->regs.cp0[12];
 
 		/* Handle software interrupts */
-		if (!!(status & cause & 0x300) & status)
+		if ((!!(status & cause & 0x300)) & status)
 			lightrec_set_exit_flags(state, LIGHTREC_EXIT_CHECK_INTERRUPT);
 
 		/* Handle hardware interrupts */
@@ -603,7 +651,7 @@ static void lightrec_mtc_cb(struct lightrec_state *state, u32 arg)
 	u8 reg;
 
 	if (op.i.op == OP_LWC2) {
-		data = state->cp2_temp_reg;
+		data = state->temp_reg;
 		reg = op.i.rt;
 	} else {
 		data = state->regs.gpr[op.r.rt];
@@ -648,7 +696,7 @@ static struct block * lightrec_get_block(struct lightrec_state *state, u32 pc)
 	u8 old_flags;
 
 	if (block && lightrec_block_is_outdated(state, block)) {
-		pr_debug("Block at PC 0x%08x is outdated!\n", block->pc);
+		pr_debug("Block at "PC_FMT" is outdated!\n", block->pc);
 
 		old_flags = block_set_flags(block, BLOCK_IS_DEAD);
 		if (!(old_flags & BLOCK_IS_DEAD)) {
@@ -657,9 +705,15 @@ static struct block * lightrec_get_block(struct lightrec_state *state, u32 pc)
 			if (ENABLE_THREADED_COMPILER)
 				lightrec_recompiler_remove(state->rec, block);
 
-			lightrec_unregister_block(state->block_cache, block);
 			remove_from_code_lut(state->block_cache, block);
-			lightrec_free_block(state, block);
+
+			if (ENABLE_THREADED_COMPILER) {
+				lightrec_reaper_add(state->reaper,
+						    lightrec_reap_block, block);
+			} else {
+				lightrec_unregister_block(state->block_cache, block);
+				lightrec_free_block(state, block);
+			}
 		}
 
 		block = NULL;
@@ -668,7 +722,7 @@ static struct block * lightrec_get_block(struct lightrec_state *state, u32 pc)
 	if (!block) {
 		block = lightrec_precompile_block(state, pc);
 		if (!block) {
-			pr_err("Unable to recompile block at PC 0x%x\n", pc);
+			pr_err("Unable to recompile block at "PC_FMT"\n", pc);
 			lightrec_set_exit_flags(state, LIGHTREC_EXIT_SEGFAULT);
 			return NULL;
 		}
@@ -703,10 +757,11 @@ static void * get_next_block_func(struct lightrec_state *state, u32 pc)
 		}
 
 		should_recompile = block_has_flag(block, BLOCK_SHOULD_RECOMPILE) &&
+			!block_has_flag(block, BLOCK_NEVER_COMPILE) &&
 			!block_has_flag(block, BLOCK_IS_DEAD);
 
 		if (unlikely(should_recompile)) {
-			pr_debug("Block at PC 0x%08x should recompile\n", pc);
+			pr_debug("Block at "PC_FMT" should recompile\n", pc);
 
 			if (ENABLE_THREADED_COMPILER) {
 				lightrec_recompiler_add(state->rec, block);
@@ -758,7 +813,7 @@ static void * get_next_block_func(struct lightrec_state *state, u32 pc)
 	} while (state->exit_flags == LIGHTREC_EXIT_NORMAL
 		 && state->current_cycle < state->target_cycle);
 
-	state->next_pc = pc;
+	state->curr_pc = pc;
 	return func;
 }
 
@@ -803,6 +858,8 @@ static void lightrec_free_code(struct lightrec_state *state, void *ptr)
 		lightrec_code_alloc_unlock(state);
 }
 
+static char lightning_code_data[0x80000];
+
 static void * lightrec_emit_code(struct lightrec_state *state,
 				 const struct block *block,
 				 jit_state_t *_jit, unsigned int *size)
@@ -813,11 +870,20 @@ static void * lightrec_emit_code(struct lightrec_state *state,
 
 	jit_realize();
 
-	if (!ENABLE_DISASSEMBLER)
+	if (ENABLE_DISASSEMBLER)
+		jit_set_data(lightning_code_data, sizeof(lightning_code_data), 0);
+	else
 		jit_set_data(NULL, 0, JIT_DISABLE_DATA | JIT_DISABLE_NOTE);
 
 	if (has_code_buffer) {
 		jit_get_code(&code_size);
+
+#ifdef __i386__
+		/* Lightning's code size estimation routine is buggy on x86 and
+		 * will return a value that's too small. */
+		code_size *= 2;
+#endif
+
 		code = lightrec_alloc_code(state, (size_t) code_size);
 
 		if (!code) {
@@ -845,6 +911,12 @@ static void * lightrec_emit_code(struct lightrec_state *state,
 	}
 
 	code = jit_emit();
+	if (!code) {
+		if (has_code_buffer)
+			lightrec_free_code(state, code);
+
+		return NULL;
+	}
 
 	jit_get_code(&new_code_size);
 	lightrec_register(MEM_FOR_CODE, new_code_size);
@@ -872,6 +944,7 @@ static struct block * generate_wrapper(struct lightrec_state *state)
 	unsigned int i;
 	jit_node_t *addr[C_WRAPPERS_COUNT - 1];
 	jit_node_t *to_end[C_WRAPPERS_COUNT - 1];
+	u8 tmp = JIT_R1;
 
 	block = lightrec_malloc(state, MEM_FOR_IR, sizeof(*block));
 	if (!block)
@@ -890,17 +963,18 @@ static struct block * generate_wrapper(struct lightrec_state *state)
 
 	/* Add entry points */
 	for (i = C_WRAPPERS_COUNT - 1; i > 0; i--) {
-		jit_ldxi(JIT_R1, LIGHTREC_REG_STATE,
+		jit_ldxi(tmp, LIGHTREC_REG_STATE,
 			 offsetof(struct lightrec_state, c_wrappers[i]));
 		to_end[i - 1] = jit_b();
 		addr[i - 1] = jit_indirect();
 	}
 
-	jit_ldxi(JIT_R1, LIGHTREC_REG_STATE,
+	jit_ldxi(tmp, LIGHTREC_REG_STATE,
 		 offsetof(struct lightrec_state, c_wrappers[0]));
 
 	for (i = 0; i < C_WRAPPERS_COUNT - 1; i++)
 		jit_patch(to_end[i]);
+	jit_movr(JIT_R1, tmp);
 
 	jit_epilog();
 	jit_prolog();
@@ -956,7 +1030,7 @@ static struct block * generate_wrapper(struct lightrec_state *state)
 	block->function = lightrec_emit_code(state, block, _jit,
 					     &block->code_size);
 	if (!block->function)
-		goto err_free_block;
+		goto err_free_jit;
 
 	state->wrappers_eps[C_WRAPPERS_COUNT - 1] = block->function;
 
@@ -971,6 +1045,8 @@ static struct block * generate_wrapper(struct lightrec_state *state)
 	jit_clear_state();
 	return block;
 
+err_free_jit:
+	jit_destroy_state();
 err_free_block:
 	lightrec_free(state, MEM_FOR_IR, sizeof(*block), block);
 err_no_mem:
@@ -986,27 +1062,78 @@ static u32 lightrec_memset(struct lightrec_state *state)
 	u32 length = state->regs.gpr[5] * 4;
 
 	if (!map) {
-		pr_err("Unable to find memory map for memset target address "
-		       "0x%x\n", kunseg_pc);
+		pr_err("Unable to find memory map for memset target address "PC_FMT"\n",
+		       kunseg_pc);
 		return 0;
 	}
 
-	pr_debug("Calling host memset, PC 0x%x (host address 0x%" PRIxPTR ") for %u bytes\n",
+	pr_debug("Calling host memset, "PC_FMT" (host address 0x%"PRIxPTR") for %u bytes\n",
 		 kunseg_pc, (uintptr_t)host, length);
 	memset(host, 0, length);
 
-	if (!state->invalidate_from_dma_only)
+	if (!(state->opt_flags & LIGHTREC_OPT_INV_DMA_ONLY))
 		lightrec_invalidate_map(state, map, kunseg_pc, length);
 
 	/* Rough estimation of the number of cycles consumed */
 	return 8 + 5 * (length  + 3 / 4);
 }
 
+static u32 lightrec_check_load_delay(struct lightrec_state *state, u32 pc, u8 reg)
+{
+	struct block *block;
+	union code first_op;
+
+	first_op = lightrec_read_opcode(state, pc);
+
+	if (likely(!opcode_reads_register(first_op, reg))) {
+		state->regs.gpr[reg] = state->temp_reg;
+	} else {
+		block = lightrec_get_block(state, pc);
+		if (unlikely(!block)) {
+			pr_err("Unable to get block at "PC_FMT"\n", pc);
+			lightrec_set_exit_flags(state, LIGHTREC_EXIT_SEGFAULT);
+			pc = 0;
+		} else {
+			pc = lightrec_handle_load_delay(state, block, pc, reg);
+		}
+	}
+
+	return pc;
+}
+
+static void update_cycle_counter_before_c(jit_state_t *_jit)
+{
+	/* update state->current_cycle */
+	jit_ldxi_i(JIT_R2, LIGHTREC_REG_STATE,
+		   offsetof(struct lightrec_state, target_cycle));
+	jit_subr(JIT_R1, JIT_R2, LIGHTREC_REG_CYCLE);
+	jit_stxi_i(offsetof(struct lightrec_state, current_cycle),
+		   LIGHTREC_REG_STATE, JIT_R1);
+}
+
+static void update_cycle_counter_after_c(jit_state_t *_jit)
+{
+	/* Recalc the delta */
+	jit_ldxi_i(JIT_R1, LIGHTREC_REG_STATE,
+		   offsetof(struct lightrec_state, current_cycle));
+	jit_ldxi_i(JIT_R2, LIGHTREC_REG_STATE,
+		   offsetof(struct lightrec_state, target_cycle));
+	jit_subr(LIGHTREC_REG_CYCLE, JIT_R2, JIT_R1);
+}
+
+static void sync_next_pc(jit_state_t *_jit)
+{
+	if (lightrec_store_next_pc()) {
+		jit_ldxi_ui(JIT_V0, LIGHTREC_REG_STATE,
+			    offsetof(struct lightrec_state, next_pc));
+	}
+}
+
 static struct block * generate_dispatcher(struct lightrec_state *state)
 {
 	struct block *block;
 	jit_state_t *_jit;
-	jit_node_t *to_end, *loop, *addr, *addr2, *addr3;
+	jit_node_t *to_end, *loop, *addr, *addr2, *addr3, *addr4, *addr5, *jmp, *jmp2;
 	unsigned int i;
 	u32 offset;
 
@@ -1047,37 +1174,98 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 
 		jit_prepare();
 		jit_pushargr(LIGHTREC_REG_STATE);
+
 		jit_finishi(lightrec_memset);
+		jit_retval(LIGHTREC_REG_CYCLE);
 
 		jit_ldxi_ui(JIT_V0, LIGHTREC_REG_STATE,
 			    offsetof(struct lightrec_state, regs.gpr[31]));
-
-		jit_retval(LIGHTREC_REG_CYCLE);
 		jit_subr(LIGHTREC_REG_CYCLE, JIT_V1, LIGHTREC_REG_CYCLE);
+
+		if (OPT_DETECT_IMPOSSIBLE_BRANCHES || OPT_HANDLE_LOAD_DELAYS)
+			jmp = jit_b();
+	}
+
+	if (OPT_DETECT_IMPOSSIBLE_BRANCHES) {
+		/* Blocks will jump here when they reach a branch that should
+		 * be executed with the interpreter, passing the branch's PC
+		 * in JIT_V0 and the address of the block in JIT_V1. */
+		addr4 = jit_indirect();
+
+		sync_next_pc(_jit);
+		update_cycle_counter_before_c(_jit);
+
+		jit_prepare();
+		jit_pushargr(LIGHTREC_REG_STATE);
+		jit_pushargr(JIT_V1);
+		jit_pushargr(JIT_V0);
+		jit_finishi(lightrec_emulate_block);
+
+		jit_retval(JIT_V0);
+
+		update_cycle_counter_after_c(_jit);
+
+		if (OPT_HANDLE_LOAD_DELAYS)
+			jmp2 = jit_b();
+
+	}
+
+	if (OPT_HANDLE_LOAD_DELAYS) {
+		/* Blocks will jump here when they reach a branch with a load
+		 * opcode in its delay slot. The delay slot has already been
+		 * executed; the load value is in (state->temp_reg), and the
+		 * register number is in JIT_V1.
+		 * Jump to a C function which will evaluate the branch target's
+		 * first opcode, to make sure that it does not read the register
+		 * in question; and if it does, handle it accordingly. */
+		addr5 = jit_indirect();
+
+		sync_next_pc(_jit);
+		update_cycle_counter_before_c(_jit);
+
+		jit_prepare();
+		jit_pushargr(LIGHTREC_REG_STATE);
+		jit_pushargr(JIT_V0);
+		jit_pushargr(JIT_V1);
+		jit_finishi(lightrec_check_load_delay);
+
+		jit_retval(JIT_V0);
+
+		update_cycle_counter_after_c(_jit);
 	}
 
 	/* The block will jump here, with the number of cycles remaining in
 	 * LIGHTREC_REG_CYCLE */
 	addr2 = jit_indirect();
 
-	/* Store back the next_pc to the lightrec_state structure */
-	offset = offsetof(struct lightrec_state, next_pc);
+	sync_next_pc(_jit);
+
+	if (OPT_HANDLE_LOAD_DELAYS && OPT_DETECT_IMPOSSIBLE_BRANCHES)
+	      jit_patch(jmp2);
+
+	if (OPT_REPLACE_MEMSET
+	    && (OPT_DETECT_IMPOSSIBLE_BRANCHES || OPT_HANDLE_LOAD_DELAYS)) {
+		jit_patch(jmp);
+	}
+
+	/* Store back the next PC to the lightrec_state structure */
+	offset = offsetof(struct lightrec_state, curr_pc);
 	jit_stxi_i(offset, LIGHTREC_REG_STATE, JIT_V0);
 
 	/* Jump to end if state->target_cycle < state->current_cycle */
 	to_end = jit_blei(LIGHTREC_REG_CYCLE, 0);
 
 	/* Convert next PC to KUNSEG and avoid mirrors */
-	jit_andi(JIT_V1, JIT_V0, 0x10000000 | (RAM_SIZE - 1));
-	jit_rshi_u(JIT_R1, JIT_V1, 28);
+	jit_andi(JIT_V1, JIT_V0, RAM_SIZE - 1);
 	jit_andi(JIT_R2, JIT_V0, BIOS_SIZE - 1);
+	jit_andi(JIT_R1, JIT_V0, BIT(28));
 	jit_addi(JIT_R2, JIT_R2, RAM_SIZE);
 	jit_movnr(JIT_V1, JIT_R2, JIT_R1);
 
 	/* If possible, use the code LUT */
 	if (!lut_is_32bit(state))
 		jit_lshi(JIT_V1, JIT_V1, 1);
-	jit_addr(JIT_V1, JIT_V1, LIGHTREC_REG_STATE);
+	jit_add_state(JIT_V1, JIT_V1);
 
 	offset = offsetof(struct lightrec_state, code_lut);
 	if (lut_is_32bit(state))
@@ -1097,11 +1285,7 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 
 	if (ENABLE_FIRST_PASS || OPT_DETECT_IMPOSSIBLE_BRANCHES) {
 		/* We may call the interpreter - update state->current_cycle */
-		jit_ldxi_i(JIT_R2, LIGHTREC_REG_STATE,
-			   offsetof(struct lightrec_state, target_cycle));
-		jit_subr(JIT_V1, JIT_R2, LIGHTREC_REG_CYCLE);
-		jit_stxi_i(offsetof(struct lightrec_state, current_cycle),
-			   LIGHTREC_REG_STATE, JIT_V1);
+		update_cycle_counter_before_c(_jit);
 	}
 
 	jit_prepare();
@@ -1119,18 +1303,14 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 	if (ENABLE_FIRST_PASS || OPT_DETECT_IMPOSSIBLE_BRANCHES) {
 		/* The interpreter may have updated state->current_cycle and
 		 * state->target_cycle - recalc the delta */
-		jit_ldxi_i(JIT_R1, LIGHTREC_REG_STATE,
-			   offsetof(struct lightrec_state, current_cycle));
-		jit_ldxi_i(JIT_R2, LIGHTREC_REG_STATE,
-			   offsetof(struct lightrec_state, target_cycle));
-		jit_subr(LIGHTREC_REG_CYCLE, JIT_R2, JIT_R1);
+		update_cycle_counter_after_c(_jit);
 	} else {
 		jit_movr(LIGHTREC_REG_CYCLE, JIT_V0);
 	}
 
 	/* Reset JIT_V0 to the next PC */
 	jit_ldxi_ui(JIT_V0, LIGHTREC_REG_STATE,
-		    offsetof(struct lightrec_state, next_pc));
+		    offsetof(struct lightrec_state, curr_pc));
 
 	/* If we get non-NULL, loop */
 	jit_patch_at(jit_bnei(JIT_V1, 0), loop);
@@ -1150,9 +1330,13 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 	block->function = lightrec_emit_code(state, block, _jit,
 					     &block->code_size);
 	if (!block->function)
-		goto err_free_block;
+		goto err_free_jit;
 
 	state->eob_wrapper_func = jit_address(addr2);
+	if (OPT_DETECT_IMPOSSIBLE_BRANCHES)
+		state->interpreter_func = jit_address(addr4);
+	if (OPT_HANDLE_LOAD_DELAYS)
+		state->ds_check_func = jit_address(addr5);
 	if (OPT_REPLACE_MEMSET)
 		state->memset_func = jit_address(addr3);
 	state->get_next_block = jit_address(addr);
@@ -1166,6 +1350,8 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 	jit_clear_state();
 	return block;
 
+err_free_jit:
+	jit_destroy_state();
 err_free_block:
 	lightrec_free(state, MEM_FOR_IR, sizeof(*block), block);
 err_no_mem:
@@ -1183,9 +1369,10 @@ union code lightrec_read_opcode(struct lightrec_state *state, u32 pc)
 	return (union code) LE32TOH(*code);
 }
 
-unsigned int lightrec_cycles_of_opcode(union code code)
+unsigned int lightrec_cycles_of_opcode(const struct lightrec_state *state,
+				       union code code)
 {
-	return 2;
+	return state->cycles_per_op;
 }
 
 void lightrec_free_opcode_list(struct lightrec_state *state, struct opcode *ops)
@@ -1291,11 +1478,6 @@ static struct block * lightrec_precompile_block(struct lightrec_state *state,
 
 	pr_debug("Block size: %hu opcodes\n", block->nb_ops);
 
-	/* If the first opcode is an 'impossible' branch, never compile the
-	 * block */
-	if (should_emulate(block->opcode_list))
-		block_flags |= BLOCK_NEVER_COMPILE;
-
 	fully_tagged = lightrec_block_is_fully_tagged(block);
 	if (fully_tagged)
 		block_flags |= BLOCK_FULLY_TAGGED;
@@ -1311,7 +1493,7 @@ static struct block * lightrec_precompile_block(struct lightrec_state *state,
 		addr = state->get_next_block;
 	lut_write(state, lut_offset(pc), addr);
 
-	pr_debug("Recompile count: %u\n", state->nb_precompile++);
+	pr_debug("Blocks created: %u\n", ++state->nb_precompile);
 
 	return block;
 }
@@ -1324,8 +1506,12 @@ static bool lightrec_block_is_fully_tagged(const struct block *block)
 	for (i = 0; i < block->nb_ops; i++) {
 		op = &block->opcode_list[i];
 
-		/* Verify that all load/stores of the opcode list
-		 * Check all loads/stores of the opcode list and mark the
+		/* If we have one branch that must be emulated, we cannot trash
+		 * the opcode list. */
+		if (should_emulate(op))
+			return false;
+
+		/* Check all loads/stores of the opcode list and mark the
 		 * block as fully compiled if they all have been tagged. */
 		switch (op->c.i.op) {
 		case OP_LB:
@@ -1342,6 +1528,8 @@ static bool lightrec_block_is_fully_tagged(const struct block *block)
 		case OP_SWR:
 		case OP_LWC2:
 		case OP_SWC2:
+		case OP_META_LWU:
+		case OP_META_SWU:
 			if (!LIGHTREC_FLAGS_GET_IO_MODE(op->flags))
 				return false;
 			fallthrough;
@@ -1357,7 +1545,7 @@ static void lightrec_reap_block(struct lightrec_state *state, void *data)
 {
 	struct block *block = data;
 
-	pr_debug("Reap dead block at PC 0x%08x\n", block->pc);
+	pr_debug("Reap dead block at "PC_FMT"\n", block->pc);
 	lightrec_unregister_block(state->block_cache, block);
 	lightrec_free_block(state, block);
 }
@@ -1388,6 +1576,8 @@ static void lightrec_reap_opcode_list(struct lightrec_state *state, void *data)
 int lightrec_compile_block(struct lightrec_cstate *cstate,
 			   struct block *block)
 {
+	struct block *dead_blocks[ARRAY_SIZE(cstate->targets)];
+	u32 was_dead[ARRAY_SIZE(cstate->targets) / 8];
 	struct lightrec_state *state = cstate->state;
 	struct lightrec_branch_target *target;
 	bool fully_tagged = false;
@@ -1416,11 +1606,14 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 	block->_jit = _jit;
 
 	lightrec_regcache_reset(cstate->reg_cache);
-	lightrec_preload_pc(cstate->reg_cache);
+
+	if (OPT_PRELOAD_PC && (block->flags & BLOCK_PRELOAD_PC))
+		lightrec_preload_pc(cstate->reg_cache, _jit);
 
 	cstate->cycles = 0;
 	cstate->nb_local_branches = 0;
 	cstate->nb_targets = 0;
+	cstate->no_load_delay = false;
 
 	jit_prolog();
 	jit_tramp(256);
@@ -1439,7 +1632,7 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 			pr_debug("Branch at offset 0x%x will be emulated\n",
 				 i << 2);
 
-			lightrec_emit_eob(cstate, block, i);
+			lightrec_emit_jump_to_interpreter(cstate, block, i);
 			skip_next = !op_flag_no_ds(elm->flags);
 		} else {
 			lightrec_rec_opcode(cstate, block, i);
@@ -1453,7 +1646,7 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 #endif
 		}
 
-		cstate->cycles += lightrec_cycles_of_opcode(elm->c);
+		cstate->cycles += lightrec_cycles_of_opcode(state, elm->c);
 	}
 
 	for (i = 0; i < cstate->nb_local_branches; i++) {
@@ -1503,23 +1696,14 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 	/* Add compiled function to the LUT */
 	lut_write(state, lut_offset(block->pc), block->function);
 
-	if (ENABLE_THREADED_COMPILER)
-		lightrec_reaper_continue(state->reaper);
-
 	/* Detect old blocks that have been covered by the new one */
-	for (i = 0; i < cstate->nb_targets; i++) {
+	for (i = 0; ENABLE_THREADED_COMPILER && i < cstate->nb_targets; i++) {
 		target = &cstate->targets[i];
 
 		if (!target->offset)
 			continue;
 
 		offset = block->pc + target->offset * sizeof(u32);
-
-		/* Pause the reaper while we search for the block until we set
-		 * the BLOCK_IS_DEAD flag, otherwise the block may be removed
-		 * under our feet. */
-		if (ENABLE_THREADED_COMPILER)
-			lightrec_reaper_pause(state->reaper);
 
 		block2 = lightrec_find_block(state->block_cache, offset);
 		if (block2) {
@@ -1529,17 +1713,26 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 			/* Set the "block dead" flag to prevent the dynarec from
 			 * recompiling this block */
 			old_flags = block_set_flags(block2, BLOCK_IS_DEAD);
+
+			if (old_flags & BLOCK_IS_DEAD)
+				was_dead[i / 32] |= BIT(i % 32);
+			else
+				was_dead[i / 32] &= ~BIT(i % 32);
 		}
 
-		if (ENABLE_THREADED_COMPILER) {
-			lightrec_reaper_continue(state->reaper);
+		dead_blocks[i] = block2;
 
-			/* If block2 was pending for compilation, cancel it.
-			 * If it's being compiled right now, wait until it
-			 * finishes. */
-			if (block2)
-				lightrec_recompiler_remove(state->rec, block2);
-		}
+		/* If block2 was pending for compilation, cancel it.
+		 * If it's being compiled right now, wait until it finishes. */
+		if (block2)
+			lightrec_recompiler_remove(state->rec, block2);
+	}
+
+	for (i = 0; i < cstate->nb_targets; i++) {
+		target = &cstate->targets[i];
+
+		if (!target->offset)
+			continue;
 
 		/* We know from now on that block2 (if present) isn't going to
 		 * be compiled. We can override the LUT entry with our new
@@ -1547,6 +1740,12 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 		offset = lut_offset(block->pc) + target->offset;
 		lut_write(state, offset, jit_address(target->label));
 
+		if (ENABLE_THREADED_COMPILER) {
+			block2 = dead_blocks[i];
+		} else {
+			offset = block->pc + target->offset * sizeof(u32);
+			block2 = lightrec_find_block(state->block_cache, offset);
+		}
 		if (block2) {
 			pr_debug("Reap block 0x%08x as it's covered by block "
 				 "0x%08x\n", block2->pc, block->pc);
@@ -1555,13 +1754,16 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 			if (!ENABLE_THREADED_COMPILER) {
 				lightrec_unregister_block(state->block_cache, block2);
 				lightrec_free_block(state, block2);
-			} else if (!(old_flags & BLOCK_IS_DEAD)) {
+			} else if (!(was_dead[i / 32] & BIT(i % 32))) {
 				lightrec_reaper_add(state->reaper,
 						    lightrec_reap_block,
 						    block2);
 			}
 		}
 	}
+
+	if (ENABLE_THREADED_COMPILER)
+		lightrec_reaper_continue(state->reaper);
 
 	if (ENABLE_DISASSEMBLER) {
 		pr_debug("Compiling block at PC: 0x%08x\n", block->pc);
@@ -1574,7 +1776,7 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 		old_flags = block_set_flags(block, BLOCK_NO_OPCODE_LIST);
 
 	if (fully_tagged && !(old_flags & BLOCK_NO_OPCODE_LIST)) {
-		pr_debug("Block PC 0x%08x is fully tagged"
+		pr_debug("Block "PC_FMT" is fully tagged"
 			 " - free opcode list\n", block->pc);
 
 		if (ENABLE_THREADED_COMPILER) {
@@ -1602,6 +1804,8 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 
 		lightrec_unregister(MEM_FOR_CODE, old_code_size);
 	}
+
+	pr_debug("Blocks compiled: %u\n", ++state->nb_compile);
 
 	return 0;
 }
@@ -1633,13 +1837,13 @@ u32 lightrec_execute(struct lightrec_state *state, u32 pc, u32 target_cycle)
 		target_cycle = UINT_MAX;
 
 	state->target_cycle = target_cycle;
-	state->next_pc = pc;
+	state->curr_pc = pc;
 
 	block_trace = get_next_block_func(state, pc);
 	if (block_trace) {
 		cycles_delta = state->target_cycle - state->current_cycle;
 
-		cycles_delta = (*func)(state, state->next_pc,
+		cycles_delta = (*func)(state, state->curr_pc,
 				       block_trace, cycles_delta);
 
 		state->current_cycle = state->target_cycle - cycles_delta;
@@ -1651,7 +1855,7 @@ u32 lightrec_execute(struct lightrec_state *state, u32 pc, u32 target_cycle)
 	if (LOG_LEVEL >= INFO_L)
 		lightrec_print_info(state);
 
-	return state->next_pc;
+	return state->curr_pc;
 }
 
 u32 lightrec_run_interpreter(struct lightrec_state *state, u32 pc,
@@ -1723,11 +1927,12 @@ void lightrec_free_cstate(struct lightrec_cstate *cstate)
 }
 
 struct lightrec_state * lightrec_init(char *argv0,
-				      const struct lightrec_mem_map *map,
+				      const struct lightrec_mem_map *maps,
 				      size_t nb,
 				      const struct lightrec_ops *ops)
 {
-	const struct lightrec_mem_map *codebuf_map = &map[PSX_MAP_CODE_BUFFER];
+	const struct lightrec_mem_map *codebuf_map = &maps[PSX_MAP_CODE_BUFFER];
+	const struct lightrec_mem_map *map;
 	struct lightrec_state *state;
 	uintptr_t addr;
 	void *tlsf = NULL;
@@ -1765,7 +1970,7 @@ struct lightrec_state * lightrec_init(char *argv0,
 	else
 		lut_size = CODE_LUT_SIZE * sizeof(void *);
 
-	init_jit(argv0);
+	init_jit_with_debug(argv0, stdout);
 
 	state = calloc(1, sizeof(*state) + lut_size);
 	if (!state)
@@ -1775,6 +1980,8 @@ struct lightrec_state * lightrec_init(char *argv0,
 
 	state->tlsf = tlsf;
 	state->with_32bit_lut = with_32bit_lut;
+	state->in_delay_slot_n = 0xff;
+	state->cycles_per_op = 2;
 
 	state->block_cache = lightrec_blockcache_init(state);
 	if (!state->block_cache)
@@ -1795,7 +2002,7 @@ struct lightrec_state * lightrec_init(char *argv0,
 	}
 
 	state->nb_maps = nb;
-	state->maps = map;
+	state->maps = maps;
 
 	memcpy(&state->ops, ops, sizeof(*ops));
 
@@ -1813,21 +2020,21 @@ struct lightrec_state * lightrec_init(char *argv0,
 	state->c_wrappers[C_WRAPPER_MTC] = lightrec_mtc_cb;
 	state->c_wrappers[C_WRAPPER_CP] = lightrec_cp_cb;
 
-	map = &state->maps[PSX_MAP_BIOS];
+	map = &maps[PSX_MAP_BIOS];
 	state->offset_bios = (uintptr_t)map->address - map->pc;
 
-	map = &state->maps[PSX_MAP_SCRATCH_PAD];
+	map = &maps[PSX_MAP_SCRATCH_PAD];
 	state->offset_scratch = (uintptr_t)map->address - map->pc;
 
-	map = &state->maps[PSX_MAP_HW_REGISTERS];
+	map = &maps[PSX_MAP_HW_REGISTERS];
 	state->offset_io = (uintptr_t)map->address - map->pc;
 
-	map = &state->maps[PSX_MAP_KERNEL_USER_RAM];
+	map = &maps[PSX_MAP_KERNEL_USER_RAM];
 	state->offset_ram = (uintptr_t)map->address - map->pc;
 
-	if (state->maps[PSX_MAP_MIRROR1].address == map->address + 0x200000 &&
-	    state->maps[PSX_MAP_MIRROR2].address == map->address + 0x400000 &&
-	    state->maps[PSX_MAP_MIRROR3].address == map->address + 0x600000)
+	if (maps[PSX_MAP_MIRROR1].address == map->address + 0x200000 &&
+	    maps[PSX_MAP_MIRROR2].address == map->address + 0x400000 &&
+	    maps[PSX_MAP_MIRROR3].address == map->address + 0x600000)
 		state->mirrors_mapped = true;
 
 	if (state->offset_bios == 0 &&
@@ -1921,12 +2128,12 @@ void lightrec_invalidate_all(struct lightrec_state *state)
 	memset(state->code_lut, 0, lut_elm_size(state) * CODE_LUT_SIZE);
 }
 
-void lightrec_set_invalidate_mode(struct lightrec_state *state, bool dma_only)
+void lightrec_set_unsafe_opt_flags(struct lightrec_state *state, u32 flags)
 {
-	if (state->invalidate_from_dma_only != dma_only)
+	if ((flags ^ state->opt_flags) & LIGHTREC_OPT_INV_DMA_ONLY)
 		lightrec_invalidate_all(state);
 
-	state->invalidate_from_dma_only = dma_only;
+	state->opt_flags = flags;
 }
 
 void lightrec_set_exit_flags(struct lightrec_state *state, u32 flags)
@@ -1968,4 +2175,23 @@ void lightrec_set_target_cycle_count(struct lightrec_state *state, u32 cycles)
 struct lightrec_registers * lightrec_get_registers(struct lightrec_state *state)
 {
 	return &state->regs;
+}
+
+void lightrec_set_cycles_per_opcode(struct lightrec_state *state, u32 cycles)
+{
+	if (state->cycles_per_op == cycles)
+		return;
+
+	state->cycles_per_op = cycles;
+
+	if (ENABLE_THREADED_COMPILER) {
+		lightrec_recompiler_pause(state->rec);
+		lightrec_reaper_reap(state->reaper);
+	}
+
+	lightrec_invalidate_all(state);
+	lightrec_free_all_blocks(state->block_cache);
+
+	if (ENABLE_THREADED_COMPILER)
+		lightrec_recompiler_unpause(state->rec);
 }

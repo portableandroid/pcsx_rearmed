@@ -3,6 +3,7 @@
 DEBUG ?= 0
 WANT_ZLIB ?= 1
 HAVE_CHD ?= 1
+HAVE_PHYSICAL_CDROM ?= 1
 USE_LIBRETRO_VFS ?= 0
 
 # Dynarec options: lightrec, ari64
@@ -24,11 +25,65 @@ endif
 CC ?= gcc
 CXX ?= g++
 AS ?= as
-CC_AS ?= $(CC)
+LD ?= ld
 CFLAGS ?=
 
+# early compiler overrides
+ifeq ($(platform),ios-arm64)
+	CC = cc -arch arm64 -isysroot $(IOSSDK)
+	CXX = c++ -arch arm64 -isysroot $(IOSSDK)
+else ifneq (,$(findstring ios,$(platform)))
+	CC = cc -arch armv7 -isysroot $(IOSSDK)
+	CXX = c++ -arch armv7 -isysroot $(IOSSDK)
+else ifeq ($(platform), tvos-arm64)
+	ifeq ($(IOSSDK),)
+		IOSSDK := $(shell xcodebuild -version -sdk appletvos Path)
+	endif
+	CC = cc -arch arm64 -isysroot $(IOSSDK)
+	CXX = c++ -arch arm64 -isysroot $(IOSSDK)
+else ifeq ($(platform), osx)
+   ifeq ($(CROSS_COMPILE),1)
+	TARGET_RULE = -target $(LIBRETRO_APPLE_PLATFORM) -isysroot $(LIBRETRO_APPLE_ISYSROOT)
+	CFLAGS   += $(TARGET_RULE)
+	CXXFLAGS += $(TARGET_RULE)
+	LDFLAGS  += $(TARGET_RULE)
+   endif
+else ifeq ($(platform), psl1ght)
+	CC = $(PS3DEV)/ppu/bin/ppu-gcc$(EXE_EXT)
+	AR = $(PS3DEV)/ppu/bin/ppu-ar$(EXE_EXT)
+else ifeq ($(platform), psp1)
+	CC = psp-gcc$(EXE_EXT)
+	AR = psp-ar$(EXE_EXT)
+else ifeq ($(platform), vita)
+	CC = arm-vita-eabi-gcc$(EXE_EXT)
+	AR = arm-vita-eabi-ar$(EXE_EXT)
+else ifeq ($(platform), ctr)
+	CC = $(DEVKITARM)/bin/arm-none-eabi-gcc$(EXE_EXT)
+	CXX = $(DEVKITARM)/bin/arm-none-eabi-g++$(EXE_EXT)
+	AR = $(DEVKITARM)/bin/arm-none-eabi-ar$(EXE_EXT)
+else ifeq ($(platform), xenon)
+	CC = xenon-gcc$(EXE_EXT)
+	AR = xenon-ar$(EXE_EXT)
+else ifneq (,$(filter $(platform),ngc wii wiiu))
+	CC  = $(DEVKITPPC)/bin/powerpc-eabi-gcc$(EXE_EXT)
+	CXX = $(DEVKITPPC)/bin/powerpc-eabi-g++$(EXE_EXT)
+	AR  = $(DEVKITPPC)/bin/powerpc-eabi-ar$(EXE_EXT)
+else ifeq ($(platform), qnx)
+	CC = qcc -Vgcc_ntoarmv7le
+else ifeq ($(platform), miyoo)
+	CC = /opt/miyoo/usr/bin/arm-linux-gcc
+	CXX = /opt/miyoo/usr/bin/arm-linux-g++
+endif
+CC_AS ?= $(CC)
+
+# workaround wrong owner in libretro infra
+GIT_VERSION1 := $(shell test -d /builds/libretro/pcsx_rearmed && git rev-parse --short HEAD 2>&1)
+ifneq ($(findstring dubious ownership,$(GIT_VERSION1)),)
+DUMMY := $(shell git config --global --add safe.directory /builds/libretro/pcsx_rearmed)
+endif
+
 TARGET_NAME := pcsx_rearmed
-ARCH_DETECTED := $(shell $(CC) -dumpmachine | awk -F- '{print $$1}')
+ARCH_DETECTED := $(shell $(CC) $(CFLAGS) -dumpmachine | awk -F- '{print $$1}')
 GIT_VERSION := " $(shell git rev-parse --short HEAD || echo unknown)"
 ifneq ($(GIT_VERSION)," unknown")
 	CFLAGS += -DGIT_VERSION=\"$(GIT_VERSION)\"
@@ -49,12 +104,15 @@ EXTRA_LDFLAGS =
 # select some defaults
 ifneq (,$(findstring $(ARCH_DETECTED),arm aarch64))
 	DYNAREC = ari64
-ifneq ($(findstring __thumb__,$(shell $(CC) -E -dD $(CFLAGS) include/arm_features.h)),)
+ifneq (,$(shell $(CC) -E -dD $(CFLAGS) include/arm_features.h | grep 'define __thumb__'))
 	# must disable thumb as ari64 can't handle it
 	CFLAGS += -marm
 endif
+ifneq (,$(shell $(CC) -E -dD $(CFLAGS) include/arm_features.h | grep 'HAVE_NEON32'))
+	BUILTIN_GPU = neon
 endif
-ifneq (,$(findstring $(ARCH_DETECTED),i686 x86_64 aarch64))
+endif
+ifneq (,$(filter $(ARCH_DETECTED),i686 x86_64 arm64 aarch64))
 	BUILTIN_GPU = neon
 endif
 
@@ -68,33 +126,28 @@ ifeq ($(platform), unix)
 ifeq ($(shell uname),Linux)
 	LIGHTREC_CUSTOM_MAP := 1
 endif
-ifneq ($(findstring SunOS,$(shell uname -s)),)
-	CC = gcc
-endif
 
 # ODROIDN2
 else ifneq (,$(findstring CortexA73_G12B,$(platform)))
 	TARGET := $(TARGET_NAME)_libretro.so
 	fpic := -fPIC
-	SHARED := -shared -Wl,-version-script=link.T
 	ARCH = arm64
 	BUILTIN_GPU = neon
 	HAVE_NEON = 1
 	DYNAREC = ari64
 	CFLAGS += -fomit-frame-pointer -ffast-math -DARM
-	CPUFLAGS += -march=armv8-a+crc -mfpu=neon-fp-armv8 -mcpu=cortex-a73 -mtune=cortex-a73.cortex-a53
+	CFLAGS += -march=armv8-a+crc -mcpu=cortex-a73 -mtune=cortex-a73.cortex-a53
 
 # ALLWINNER H5
 else ifneq (,$(findstring h5,$(platform)))
 	TARGET := $(TARGET_NAME)_libretro.so
 	fpic := -fPIC
-	SHARED := -shared -Wl,-version-script=link.T
 	ARCH = arm64
 	BUILTIN_GPU = neon
 	HAVE_NEON = 1
 	DYNAREC = ari64
 	CFLAGS += -fomit-frame-pointer -ffast-math -DARM
-	CPUFLAGS += -march=armv8-a+crc -mfpu=neon-fp-armv8 -mcpu=cortex-a53 -mtune=cortex-a53
+	CFLAGS += -march=armv8-a+crc -mcpu=cortex-a53 -mtune=cortex-a53
 
 else ifeq ($(platform), linux-portable)
 	TARGET := $(TARGET_NAME)_libretro.so
@@ -112,25 +165,16 @@ else ifeq ($(platform), osx)
 	DYNAREC := 0
 	TARGET := $(TARGET_NAME)_libretro.dylib
 	fpic := -fPIC
-	HAVE_NEON = 0
    MACSOSVER = `sw_vers -productVersion | cut -d. -f 1`
    OSXVER = `sw_vers -productVersion | cut -d. -f 2`
    OSX_LT_MAVERICKS = `(( $(OSXVER) <= 9)) && echo "YES"`
    ifeq ($(OSX_LT_MAVERICKS),YES)
    	   fpic += -mmacosx-version-min=10.1
    endif
-
-   ifeq ($(CROSS_COMPILE),1)
-		TARGET_RULE   = -target $(LIBRETRO_APPLE_PLATFORM) -isysroot $(LIBRETRO_APPLE_ISYSROOT)
-		CFLAGS   += $(TARGET_RULE)
-		CPPFLAGS += $(TARGET_RULE)
-		CXXFLAGS += $(TARGET_RULE)
-		LDFLAGS  += $(TARGET_RULE)
-   endif
-
 	CFLAGS  += $(ARCHFLAGS)
 	CXXFLAGS  += $(ARCHFLAGS)
 	LDFLAGS += $(ARCHFLAGS)
+	HAVE_PHYSICAL_CDROM = 0
 
 # iOS
 else ifneq (,$(findstring ios,$(platform)))
@@ -148,15 +192,11 @@ endif
 
 	CFLAGS += -DIOS -marm
 ifeq ($(platform),ios-arm64)
-        CC = cc -arch arm64 -isysroot $(IOSSDK)
-	CXX = c++ -arch arm64 -isysroot $(IOSSDK)
 	ARCH := arm64
 	BUILTIN_GPU = neon
 	HAVE_NEON = 1
 	DYNAREC = 0
 else
-	CC = cc -arch armv7 -isysroot $(IOSSDK)
-	CXX = c++ -arch armv7 -isysroot $(IOSSDK)
 	ARCH := arm
 	HAVE_NEON = 1
 	HAVE_NEON_ASM = 1
@@ -164,6 +204,7 @@ else
 	CFLAGS += -mcpu=cortex-a8 -mtune=cortex-a8 -mfpu=neon
 	ASFLAGS += -mcpu=cortex-a8 -mtune=cortex-a8 -mfpu=neon
 endif
+	HAVE_PHYSICAL_CDROM = 0
 	CC_AS = perl ./tools/gas-preprocessor.pl $(CC)
 ifeq ($(platform),$(filter $(platform),ios9 ios-arm64))
 	MINVERSION = -miphoneos-version-min=8.0
@@ -186,12 +227,11 @@ endif
 	endif
 
 	CFLAGS += -DIOS -DTVOS
-        CC = cc -arch arm64 -isysroot $(IOSSDK)
-	CXX = c++ -arch arm64 -isysroot $(IOSSDK)
 	ARCH := arm64
 	BUILTIN_GPU = neon
 	HAVE_NEON = 1
 	DYNAREC = 0
+	HAVE_PHYSICAL_CDROM = 0
 	CC_AS = perl ./tools/gas-preprocessor.pl $(CC)
 
 # Nintendo Switch (libnx)
@@ -202,16 +242,19 @@ else ifeq ($(platform), libnx)
    ARCH := arm64
    HAVE_VFS_FD = 0
    CFLAGS += -O3 -fomit-frame-pointer -ffast-math -I$(DEVKITPRO)/libnx/include/ -fPIE -Wl,--allow-multiple-definition # -include $(LIBNX)/include/switch.h
-   CFLAGS += -specs=$(DEVKITPRO)/libnx/switch.specs -DNO_OS -DNO_DYLIB -DNO_SOCKET -D__arm64__ -D__ARM_NEON__
+   CFLAGS += -specs=$(DEVKITPRO)/libnx/switch.specs -DNO_DYLIB -D__arm64__ -D__ARM_NEON__
    CFLAGS += -D__SWITCH__ -DHAVE_LIBNX
    CFLAGS += -DARM -D__aarch64__=1 -march=armv8-a -mtune=cortex-a57 -mtp=soft -DHAVE_INTTYPES -DLSB_FIRST -ffast-math -mcpu=cortex-a57+crc+fp+simd -ffunction-sections
    CFLAGS += -ftree-vectorize
    CFLAGS += -Ifrontend/switch -ftree-vectorize
+   NO_POSIX_MEMALIGN := 1
+   NO_PTHREAD=1
    LIBPTHREAD :=
    STATIC_LINKING=1
    BUILTIN_GPU = neon
    HAVE_NEON = 1
    DYNAREC = ari64
+   HAVE_PHYSICAL_CDROM = 0
 
 # Lakka Switch (arm64)
 else ifeq ($(platform), arm64)
@@ -220,6 +263,7 @@ else ifeq ($(platform), arm64)
    BUILTIN_GPU = neon
    HAVE_NEON = 1
    DYNAREC = ari64
+   HAVE_PHYSICAL_CDROM = 0
    fpic := -fPIC
    CFLAGS := $(filter-out -O2, $(CFLAGS))
    CFLAGS += -O3 -ftree-vectorize
@@ -227,29 +271,33 @@ else ifeq ($(platform), arm64)
 # Lightweight PS3 Homebrew SDK
 else ifeq ($(platform), psl1ght)
 	TARGET := $(TARGET_NAME)_libretro_psl1ght.a
-	CC = $(PS3DEV)/ppu/bin/ppu-gcc$(EXE_EXT)
-	AR = $(PS3DEV)/ppu/bin/ppu-ar$(EXE_EXT)
 	CFLAGS += -DBLARGG_BIG_ENDIAN=1 -D__ppc__
+	CFLAGS += -DNO_DYLIB
+	NO_UNDEF_CHECK := 1
+	STATIC_LINKING := 1
+	NO_MMAP := 1
+	NO_PTHREAD := 1
+	LIBPTHREAD :=
+	LIBDL :=
+	NEED_SYSCONF := 1
+	HAVE_PHYSICAL_CDROM = 0
 
 # PSP
 else ifeq ($(platform), psp1)
 	TARGET := $(TARGET_NAME)_libretro_psp1.a
-	CC = psp-gcc$(EXE_EXT)
-	AR = psp-ar$(EXE_EXT)
 	CFLAGS += -DPSP -G0
+	HAVE_PHYSICAL_CDROM = 0
 
 # Vita
 else ifeq ($(platform), vita)
 	TARGET := $(TARGET_NAME)_libretro_vita.a
-	CC = arm-vita-eabi-gcc$(EXE_EXT)
-	AR = arm-vita-eabi-ar$(EXE_EXT)
 	CFLAGS += -DVITA
 	CFLAGS += -mcpu=cortex-a8 -mtune=cortex-a8 -mfpu=neon -marm
 	CFLAGS += -fsingle-precision-constant -mword-relocations -fno-unwind-tables
 	CFLAGS += -fno-asynchronous-unwind-tables -ftree-vectorize -funroll-loops
 	CFLAGS += -fno-optimize-sibling-calls
 	CFLAGS += -I$(VITASDK)/include -Ifrontend/vita
-	CFLAGS += -DNO_SOCKET -DNO_OS -DNO_DYLIB
+	CFLAGS += -DNO_DYLIB
 	ASFLAGS += -mcpu=cortex-a8 -mtune=cortex-a8 -mfpu=neon
 
 #	CFLAGS += -U__ARM_NEON__
@@ -260,20 +308,21 @@ else ifeq ($(platform), vita)
 	DYNAREC = ari64
 	ARCH = arm
 	STATIC_LINKING = 1
+	NO_PTHREAD=1
+	NO_POSIX_MEMALIGN := 1
+	HAVE_PHYSICAL_CDROM = 0
 
 # CTR(3DS)
 else ifeq ($(platform), ctr)
 	TARGET := $(TARGET_NAME)_libretro_ctr.a
-	CC = $(DEVKITARM)/bin/arm-none-eabi-gcc$(EXE_EXT)
-	CXX = $(DEVKITARM)/bin/arm-none-eabi-g++$(EXE_EXT)
-	AR = $(DEVKITARM)/bin/arm-none-eabi-ar$(EXE_EXT)
-	CFLAGS += -DARM11 -D_3DS -DNO_OS -DNO_DYLIB -DNO_SOCKET -DTHREAD_ENABLED -DGPU_UNAI_USE_FLOATMATH -DGPU_UNAI_USE_FLOAT_DIV_MULTINV
+	CFLAGS += -DARM11 -D_3DS -DNO_DYLIB -DGPU_UNAI_USE_FLOATMATH -DGPU_UNAI_USE_FLOAT_DIV_MULTINV
 	CFLAGS += -march=armv6k -mtune=mpcore -mfloat-abi=hard -marm -mfpu=vfp -mtp=soft
 	CFLAGS += -Wall -mword-relocations
 	CFLAGS += -fomit-frame-pointer -ffast-math -funroll-loops
 	CFLAGS += -Ifrontend/3ds -I$(CTRULIB)/include
 	CFLAGS += -Werror=implicit-function-declaration
 	CFLAGS += -DHAVE_UNISTD_H
+	CFLAGS += -DZ7_DECL_Int32_AS_long
 
 	OBJS += frontend/3ds/utils.o
 
@@ -284,34 +333,51 @@ else ifeq ($(platform), ctr)
 	ARCH = arm
 	HAVE_NEON = 0
 	STATIC_LINKING = 1
+	NO_POSIX_MEMALIGN := 1
+	HAVE_PHYSICAL_CDROM = 0
 
 # Xbox 360
 else ifeq ($(platform), xenon)
 	TARGET := $(TARGET_NAME)_libretro_xenon360.a
-	CC = xenon-gcc$(EXE_EXT)
-	AR = xenon-ar$(EXE_EXT)
 	CFLAGS += -D__LIBXENON__ -m32 -D__ppc__
+	HAVE_PHYSICAL_CDROM = 0
 
-# Nintendo Game Cube
-else ifeq ($(platform), ngc)
-	TARGET := $(TARGET_NAME)_libretro_ngc.a
-	CC = $(DEVKITPPC)/bin/powerpc-eabi-gcc$(EXE_EXT)
-	AR = $(DEVKITPPC)/bin/powerpc-eabi-ar$(EXE_EXT)
-	CFLAGS += -DGEKKO -DHW_DOL -mrvl -mcpu=750 -meabi -mhard-float -DBLARGG_BIG_ENDIAN=1 -D__ppc__
-
-# Nintendo Wii
-else ifeq ($(platform), wii)
-	TARGET := libretro_$(TARGET_NAME)_wii.a
-	CC = $(DEVKITPPC)/bin/powerpc-eabi-gcc$(EXE_EXT)
-	AR = $(DEVKITPPC)/bin/powerpc-eabi-ar$(EXE_EXT)
-	CFLAGS += -DGEKKO -DHW_RVL -mrvl -mcpu=750 -meabi -mhard-float -DBLARGG_BIG_ENDIAN=1 -D__ppc__
+# Nintendo GC/Wii/WiiU
+else ifneq (,$(filter $(platform),ngc wii wiiu))
+	TARGET := $(TARGET_NAME)_libretro_$(platform).a
+	ifeq ($(platform), ngc)
+		CFLAGS += -DHW_DOL -mogc
+		NEED_SYSCONF := 1
+	else ifeq ($(platform), wii)
+		CFLAGS += -DHW_RVL -mrvl
+		NEED_SYSCONF := 1
+	else ifeq ($(platform), wiiu)
+		# -mwup was removed in newer devkitPPC versions
+		CFLAGS += -DHW_WUP
+		CFLAGS += -I frontend/wiiu
+		CFLAGS += -DZ7_DECL_Int32_AS_long
+		LIGHTREC_CUSTOM_MAP := 1
+		LIGHTREC_CUSTOM_MAP_OBJ := libpcsxcore/lightrec/mem_wiiu.o
+	endif
+	ARCH = powerpc
+	BUILTIN_GPU = peops
+	CFLAGS += -D__ppc__ -D__powerpc__
+	CFLAGS += -DGEKKO -mcpu=750 -meabi -mhard-float
+	CFLAGS += -DNO_DYLIB
+	STATIC_LINKING := 1
+	THREAD_RENDERING := 0
+	NO_PTHREAD := 1
+	NO_MMAP := 1
+	NO_POSIX_MEMALIGN := 1
+	LIBDL :=
+	LIBPTHREAD :=
+	LIBRT :=
+	HAVE_PHYSICAL_CDROM = 0
 
 # QNX
 else ifeq ($(platform), qnx)
 	TARGET := $(TARGET_NAME)_libretro_qnx.so
 	fpic := -fPIC
-	CC = qcc -Vgcc_ntoarmv7le
-	CC_AS = $(CC)
 	HAVE_NEON = 1
 	HAVE_NEON_ASM = 1
 	DYNAREC = ari64
@@ -323,6 +389,7 @@ else ifeq ($(platform), qnx)
 	LIBPTHREAD :=
 	LIBDL :=
 	LIBM :=
+	HAVE_PHYSICAL_CDROM = 0
 
 #Raspberry Pi 1
 else ifeq ($(platform), rpi1)
@@ -401,8 +468,7 @@ else ifeq ($(platform), classic_armv7_a7)
 	TARGET := $(TARGET_NAME)_libretro.so
 	fpic := -fPIC
 	CFLAGS += -Ofast \
-	-flto=4 -fwhole-program -fuse-linker-plugin \
-	-fdata-sections -ffunction-sections -Wl,--gc-sections \
+	-flto=auto -fuse-linker-plugin \
 	-fno-stack-protector -fno-ident -fomit-frame-pointer \
 	-falign-functions=1 -falign-jumps=1 -falign-loops=1 \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables -fno-unroll-loops \
@@ -432,7 +498,8 @@ else ifeq ($(platform), classic_armv8_a35)
 	TARGET := $(TARGET_NAME)_libretro.so
 	fpic := -fPIC
 	CFLAGS += -Ofast \
-	-fmerge-all-constants -fno-math-errno -march=armv8-a \
+	-fmerge-all-constants -fno-math-errno \
+	-fno-stack-protector -fomit-frame-pointer \
 	-marm -mcpu=cortex-a35 -mtune=cortex-a35 -mfpu=neon-fp-armv8 -mfloat-abi=hard
 	HAVE_NEON = 1
 	HAVE_NEON_ASM = 1
@@ -480,11 +547,9 @@ else ifneq (,$(findstring armv,$(platform)))
 
 else ifeq ($(platform), miyoo)
 	TARGET := $(TARGET_NAME)_libretro.so
-	CC = /opt/miyoo/usr/bin/arm-linux-gcc
-	CXX = /opt/miyoo/usr/bin/arm-linux-g++
 	fpic := -fPIC
 	CFLAGS += -mcpu=arm926ej-s -fsingle-precision-constant
-	CFLAGS += -DGPULIB_USE_MMAP -DGPU_UNAI_USE_INT_DIV_MULTINV -D_MIYOO
+	CFLAGS += -DGPU_UNAI_USE_INT_DIV_MULTINV -D_MIYOO
 	ARCH = arm
 	BUILTIN_GPU = unai
 	DYNAREC = ari64
@@ -494,17 +559,26 @@ else ifeq ($(platform), miyoo)
 else ifeq ($(platform), emscripten)
    TARGET  := $(TARGET_NAME)_libretro_$(platform).bc
    fpic    := -fPIC
-   SHARED  := -shared -Wl,--no-undefined -Wl,--version-script=link.T
+   NO_MMAP = 1
    CFLAGS += -DNO_DYLIB -DNO_SOCKET
+   CFLAGS += -msimd128 -ftree-vectorize
+   LIBPTHREAD :=
+   NO_PTHREAD=1
+   DYNAREC =
    STATIC_LINKING = 1
+   HAVE_PHYSICAL_CDROM = 0
 
 # Windows
 else
 	TARGET := $(TARGET_NAME)_libretro.dll
 	PLATFORM = libretro
-	MAIN_LDFLAGS += -static-libgcc -static-libstdc++ -s
+	MAIN_LDFLAGS += -static-libgcc -static-libstdc++
+ifneq ($(DEBUG),1)
+	MAIN_LDFLAGS += -s
+endif
 	CFLAGS += -D__WIN32__ -DNO_DYLIB
 	MMAP_WIN32=1
+	NO_PTHREAD=1
 	MAIN_LDLIBS += -lws2_32
 	LIBPTHREAD :=
 	LIBDL :=
@@ -525,11 +599,18 @@ endif
 ifndef ARCH
 ARCH = $(ARCH_DETECTED)
 endif
-ifndef HAVE_NEON
-HAVE_NEON = $(shell $(CC) -E -dD - < /dev/null 2> /dev/null | grep -q __ARM_NEON__ && echo 1 || echo 0)
+ifndef HAVE_NEON_ASM
+# asm for 32bit only
+HAVE_NEON_ASM = $(shell $(CC) -E -dD $(CFLAGS) include/arm_features.h | grep -q HAVE_NEON32 && echo 1 || echo 0)
 endif
-ifeq ($(NO_UNDEF_CHECK)$(shell ld -v 2> /dev/null | awk '{print $$1}'),GNU)
-MAIN_LDFLAGS += -Wl,--no-undefined
+ifeq ($(NO_UNDEF_CHECK)$(shell $(LD) -v 2> /dev/null | awk '{print $$1}'),GNU)
+ ifeq (,$(findstring $(platform),win32))
+ MAIN_LDFLAGS += -Wl,-version-script=frontend/link.T
+ endif
+ ifneq ($(STATIC_LINKING), 1)
+ CFLAGS += -ffunction-sections -fdata-sections
+ endif
+MAIN_LDFLAGS += -Wl,--gc-sections -Wl,--no-undefined
 endif
 ifdef ALLOW_LIGHTREC_ON_ARM
 CFLAGS += -DALLOW_LIGHTREC_ON_ARM
@@ -551,21 +632,12 @@ SOUND_DRIVERS = libretro
 PLUGINS =
 NO_CONFIG_MAK = yes
 
-# what does this do
-#libretro_all: all
-#ifeq ($(platform),ios)
-#ifeq ($(DYNAREC),1)
-#	make -f Makefile.libretro DYNAREC=0 platform=$(platform) clean
-#	make -f Makefile.libretro DYNAREC=0 platform=$(platform)
-#endif
-#endif
-
 $(info TARGET:      $(TARGET))
 $(info platform:    $(platform))
 $(info ARCH:        $(ARCH))
 $(info DYNAREC:     $(DYNAREC))
 $(info BUILTIN_GPU: $(BUILTIN_GPU))
-$(info CC:          $(CC))
+$(info CC:          $(CC) : $(shell $(CC) --version | head -1))
 $(info CFLAGS:      $(CFLAGS))
 $(info MAIN_LDLIBS: $(MAIN_LDLIBS))
 $(info )

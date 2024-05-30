@@ -145,13 +145,18 @@
 #define H_SPU_ADSRLevel22  0x0d68
 #define H_SPU_ADSRLevel23  0x0d78
 
-#define CTRL_IRQ                0x40
-#define CTRL_REVERB             0x80
+#define CTRL_CD                 0x0001
+#define CTRL_CDREVERB           0x0004
+#define CTRL_IRQ                0x0040
+#define CTRL_REVERB             0x0080
 #define CTRL_NOISE              0x3f00
 #define CTRL_MUTE               0x4000
 #define CTRL_ON                 0x8000
 
-#define STAT_IRQ                0x40
+#define STAT_IRQ                0x0040
+#define STAT_DMA_W              0x0100
+#define STAT_DMA_R              0x0200
+#define STAT_DMA_BUSY           0x0400
 
 ///////////////////////////////////////////////////////////
 

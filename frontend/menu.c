@@ -9,6 +9,11 @@
  */
 
 #define _GNU_SOURCE 1
+#ifdef __FreeBSD__
+#define STAT stat
+#else
+#define STAT stat64
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -36,7 +41,6 @@
 #include "../libpcsxcore/cdriso.h"
 #include "../libpcsxcore/cheat.h"
 #include "../libpcsxcore/new_dynarec/new_dynarec.h"
-#include "../plugins/dfinput/externals.h"
 #include "../plugins/dfsound/spu_config.h"
 #include "psemu_plugin_defs.h"
 #include "arm_features.h"
@@ -87,10 +91,12 @@ typedef enum
 	MA_OPT_VOUT_MODE,
 	MA_OPT_SCANLINES,
 	MA_OPT_SCANLINE_LEVEL,
+	MA_OPT_CENTERING,
 } menu_id;
 
 static int last_vout_w, last_vout_h, last_vout_bpp;
-static int cpu_clock, cpu_clock_st, volume_boost, frameskip;
+static int cpu_clock, cpu_clock_st, volume_boost;
+static int frameskip = 1; // 0 - auto, 1 - off
 static char last_selected_fname[MAXPATHLEN];
 static int config_save_counter, region, in_type_sel1, in_type_sel2;
 static int psx_clock;
@@ -110,7 +116,7 @@ int soft_filter;
 #define DEFAULT_PSX_CLOCK_S "50"
 #endif
 
-static const char *bioses[24];
+static const char *bioses[32];
 static const char *gpu_plugins[16];
 static const char *spu_plugins[16];
 static const char *memcards[32];
@@ -211,9 +217,9 @@ static int optional_cdimg_filter(struct dirent **namelist, int count,
 	const char *basedir)
 {
 	const char *ext, *p;
-	char buf[256], buf2[256];
+	char buf[256], buf2[257];
 	int i, d, ret, good_cue;
-	struct stat64 statf;
+	struct STAT statf;
 	FILE *f;
 
 	if (count <= 1)
@@ -262,7 +268,7 @@ static int optional_cdimg_filter(struct dirent **namelist, int count,
 					p = buf2;
 
 				snprintf(buf, sizeof(buf), "%s/%s", basedir, p);
-				ret = stat64(buf, &statf);
+				ret = STAT(buf, &statf);
 				if (ret == 0) {
 					rm_namelist_entry(namelist, count, p);
 					good_cue = 1;
@@ -310,12 +316,16 @@ static void menu_sync_config(void)
 
 	switch (in_type_sel1) {
 	case 1:  in_type[0] = PSE_PAD_TYPE_ANALOGPAD; break;
-	case 2:  in_type[0] = PSE_PAD_TYPE_NEGCON;    break;
+	case 2:  in_type[0] = PSE_PAD_TYPE_GUNCON;    break;
+	case 3:  in_type[0] = PSE_PAD_TYPE_GUN;       break;
+	case 4:  in_type[0] = PSE_PAD_TYPE_NONE;      break;
 	default: in_type[0] = PSE_PAD_TYPE_STANDARD;
 	}
 	switch (in_type_sel2) {
 	case 1:  in_type[1] = PSE_PAD_TYPE_ANALOGPAD; break;
-	case 2:  in_type[1] = PSE_PAD_TYPE_NEGCON;    break;
+	case 2:  in_type[1] = PSE_PAD_TYPE_GUNCON;    break;
+	case 3:  in_type[1] = PSE_PAD_TYPE_GUN;       break;
+	case 4:  in_type[1] = PSE_PAD_TYPE_NONE;      break;
 	default: in_type[1] = PSE_PAD_TYPE_STANDARD;
 	}
 	if (in_evdev_allow_abs_only != allow_abs_only_old) {
@@ -336,7 +346,7 @@ static void menu_set_defconfig(void)
 	g_scaler = SCALE_4_3;
 	g_gamma = 100;
 	volume_boost = 0;
-	frameskip = 0;
+	frameskip = 1; // 1 - off
 	analog_deadzone = 50;
 	soft_scaling = 1;
 	soft_filter = 0;
@@ -398,6 +408,9 @@ static const struct {
 	CE_CONFIG_VAL(DisableStalls),
 	CE_CONFIG_VAL(Cpu),
 	CE_CONFIG_VAL(GpuListWalking),
+	CE_CONFIG_VAL(FractionalFramerate),
+	CE_CONFIG_VAL(PreciseExceptions),
+	CE_CONFIG_VAL(TurboCD),
 	CE_INTVAL(region),
 	CE_INTVAL_V(g_scaler, 3),
 	CE_INTVAL(g_gamma),
@@ -422,25 +435,24 @@ static const struct {
 	CE_INTVAL(g_autostateld_opt),
 	CE_INTVAL_N("adev0_is_nublike", in_adev_is_nublike[0]),
 	CE_INTVAL_N("adev1_is_nublike", in_adev_is_nublike[1]),
-	CE_INTVAL_V(frameskip, 3),
+	CE_INTVAL_V(frameskip, 4),
 	CE_INTVAL_P(gpu_peops.iUseDither),
 	CE_INTVAL_P(gpu_peops.dwActFixes),
-	CE_INTVAL_P(gpu_unai.lineskip),
-	CE_INTVAL_P(gpu_unai.abe_hack),
-	CE_INTVAL_P(gpu_unai.no_light),
-	CE_INTVAL_P(gpu_unai.no_blend),
-#if 0
-	CE_INTVAL_P(gpu_senquack.ilace_force),
-	CE_INTVAL_P(gpu_senquack.pixel_skip),
-	CE_INTVAL_P(gpu_senquack.lighting),
-	CE_INTVAL_P(gpu_senquack.fast_lighting),
-	CE_INTVAL_P(gpu_senquack.blending),
-	CE_INTVAL_P(gpu_senquack.dithering),
-	CE_INTVAL_P(gpu_senquack.scale_hires),
-#endif
+	CE_INTVAL_P(gpu_unai_old.lineskip),
+	CE_INTVAL_P(gpu_unai_old.abe_hack),
+	CE_INTVAL_P(gpu_unai_old.no_light),
+	CE_INTVAL_P(gpu_unai_old.no_blend),
+	CE_INTVAL_P(gpu_unai.ilace_force),
+	CE_INTVAL_P(gpu_unai.pixel_skip),
+	CE_INTVAL_P(gpu_unai.lighting),
+	CE_INTVAL_P(gpu_unai.fast_lighting),
+	CE_INTVAL_P(gpu_unai.blending),
+	CE_INTVAL_P(gpu_unai.dithering),
+	CE_INTVAL_P(gpu_unai.scale_hires),
 	CE_INTVAL_P(gpu_neon.allow_interlace),
 	CE_INTVAL_P(gpu_neon.enhancement_enable),
 	CE_INTVAL_P(gpu_neon.enhancement_no_main),
+	CE_INTVAL_P(gpu_neon.enhancement_tex_adj),
 	CE_INTVAL_P(gpu_peopsgl.bDrawDither),
 	CE_INTVAL_P(gpu_peopsgl.iFilterType),
 	CE_INTVAL_P(gpu_peopsgl.iFrameTexType),
@@ -451,6 +463,9 @@ static const struct {
 	CE_INTVAL_P(gpu_peopsgl.iVRamSize),
 	CE_INTVAL_P(gpu_peopsgl.iTexGarbageCollection),
 	CE_INTVAL_P(gpu_peopsgl.dwActFixes),
+	CE_INTVAL_P(screen_centering_type),
+	CE_INTVAL_P(screen_centering_x),
+	CE_INTVAL_P(screen_centering_y),
 	CE_INTVAL(spu_config.iUseReverb),
 	CE_INTVAL(spu_config.iXAPitch),
 	CE_INTVAL(spu_config.iUseInterpolation),
@@ -489,6 +504,13 @@ static void make_cfg_fname(char *buf, size_t size, int is_game)
 static void keys_write_all(FILE *f);
 static char *mystrip(char *str);
 
+static void write_u32_value(FILE *f, u32 v)
+{
+	if (v > 7)
+		fprintf(f, "0x");
+	fprintf(f, "%x\n", v);
+}
+
 static int menu_write_config(int is_game)
 {
 	char cfgfile[MAXPATHLEN];
@@ -511,13 +533,13 @@ static int menu_write_config(int is_game)
 			fprintf(f, "%s\n", (char *)config_data[i].val);
 			break;
 		case 1:
-			fprintf(f, "%x\n", *(u8 *)config_data[i].val);
+			write_u32_value(f, *(u8 *)config_data[i].val);
 			break;
 		case 2:
-			fprintf(f, "%x\n", *(u16 *)config_data[i].val);
+			write_u32_value(f, *(u16 *)config_data[i].val);
 			break;
 		case 4:
-			fprintf(f, "%x\n", *(u32 *)config_data[i].val);
+			write_u32_value(f, *(u32 *)config_data[i].val);
 			break;
 		default:
 			printf("menu_write_config: unhandled len %d for %s\n",
@@ -536,7 +558,7 @@ static int menu_do_last_cd_img(int is_get)
 {
 	static const char *defaults[] = { "/media", "/mnt/sd", "/mnt" };
 	char path[256];
-	struct stat64 st;
+	struct STAT st;
 	FILE *f;
 	int i, ret = -1;
 
@@ -559,7 +581,7 @@ static int menu_do_last_cd_img(int is_get)
 out:
 	if (is_get) {
 		for (i = 0; last_selected_fname[0] == 0
-		       || stat64(last_selected_fname, &st) != 0; i++)
+		       || STAT(last_selected_fname, &st) != 0; i++)
 		{
 			if (i >= ARRAY_SIZE(defaults))
 				break;
@@ -584,7 +606,7 @@ static void parse_str_val(char *cval, const char *src)
 
 static void keys_load_all(const char *cfg);
 
-static int menu_load_config(int is_game)
+int menu_load_config(int is_game)
 {
 	char cfgfile[MAXPATHLEN];
 	int i, ret = -1;
@@ -884,6 +906,7 @@ me_bind_action emuctrl_actions[] =
 	{ "Volume Up        ", 1 << SACTION_VOLUME_UP },
 	{ "Volume Down      ", 1 << SACTION_VOLUME_DOWN },
 #endif
+	{ "Analog toggle    ", 1 << SACTION_ANALOG_TOGGLE },
 	{ NULL,                0 }
 };
 
@@ -1200,6 +1223,8 @@ static const char *men_in_type_sel[] = {
 	"Standard (SCPH-1080)",
 	"Analog (SCPH-1150)",
 	"GunCon",
+	"Konami Gun",
+	"None",
 	NULL
 };
 static const char h_nub_btns[] = "Experimental, keep this OFF if unsure. Select rescan after change.";
@@ -1253,6 +1278,7 @@ static const char *men_soft_filter[] = { "None",
 #endif
 	NULL };
 static const char *men_dummy[] = { NULL };
+static const char *men_centering[] = { "Auto", "Ingame", "Borderless", "Force", NULL };
 static const char h_scaler[]    = "int. 2x  - scales w. or h. 2x if it fits on screen\n"
 				  "int. 4:3 - uses integer if possible, else fractional";
 static const char h_cscaler[]   = "Displays the scaler layer, you can resize it\n"
@@ -1260,24 +1286,47 @@ static const char h_cscaler[]   = "Displays the scaler layer, you can resize it\
 static const char h_soft_filter[] = "Works only if game uses low resolution modes";
 static const char h_gamma[]     = "Gamma/brightness adjustment (default 100)";
 #ifdef __ARM_NEON__
+static const char *men_scanlines[] = { "OFF", "1", "2", "3", NULL };
 static const char h_scanline_l[]  = "Scanline brightness, 0-100%";
 #endif
 
 static int menu_loop_cscaler(int id, int keys)
 {
+	void *saved_layer = NULL;
+	size_t saved_layer_size = 0;
+	int was_layer_clipped = 0;
 	unsigned int inp;
 
+	if (!pl_vout_buf)
+		return -1;
+
 	g_scaler = SCALE_CUSTOM;
+	saved_layer_size = last_vout_w * last_vout_h * last_vout_bpp / 8;
+	saved_layer = malloc(saved_layer_size);
+	if (saved_layer)
+		memcpy(saved_layer, pl_vout_buf, saved_layer_size);
 
 	plat_gvideo_open(Config.PsxType);
 
+	menu_draw_begin(0, 1);
+	memset(g_menuscreen_ptr, 4, g_menuscreen_w * g_menuscreen_h * 2);
+	menu_draw_end();
+
 	for (;;)
 	{
-		menu_draw_begin(0, 1);
-		memset(g_menuscreen_ptr, 4, g_menuscreen_w * g_menuscreen_h * 2);
-		text_out16(2, 2, "%d,%d", g_layer_x, g_layer_y);
-		text_out16(2, 480 - 18, "%dx%d | d-pad: resize, R+d-pad: move",	g_layer_w, g_layer_h);
-		menu_draw_end();
+		if (saved_layer && last_vout_bpp == 16) {
+			int top_x = max(0, -g_layer_x * last_vout_w / 800) + 1;
+			int top_y = max(0, -g_layer_y * last_vout_h / 480) + 1;
+			char text[128];
+			memcpy(pl_vout_buf, saved_layer, saved_layer_size);
+			snprintf(text, sizeof(text), "%d,%d %dx%d",
+				g_layer_x, g_layer_y, g_layer_w, g_layer_h);
+			basic_text_out16_nf(pl_vout_buf, last_vout_w,
+				top_x, top_y, text);
+			basic_text_out16_nf(pl_vout_buf, last_vout_w, 2,
+				last_vout_h - 20, "d-pad: resize, R+d-pad: move");
+			pl_vout_buf = plat_gvideo_flip();
+		}
 
 		inp = in_menu_wait(PBTN_UP|PBTN_DOWN|PBTN_LEFT|PBTN_RIGHT
 				|PBTN_R|PBTN_MOK|PBTN_MBACK, NULL, 40);
@@ -1295,35 +1344,44 @@ static int menu_loop_cscaler(int id, int keys)
 			break;
 
 		if (inp & (PBTN_UP|PBTN_DOWN|PBTN_LEFT|PBTN_RIGHT)) {
-			if (g_layer_x < 0)   g_layer_x = 0;
-			if (g_layer_x > 640) g_layer_x = 640;
-			if (g_layer_y < 0)   g_layer_y = 0;
-			if (g_layer_y > 420) g_layer_y = 420;
-			if (g_layer_w < 160) g_layer_w = 160;
-			if (g_layer_h < 60)  g_layer_h = 60;
-			if (g_layer_x + g_layer_w > 800)
-				g_layer_w = 800 - g_layer_x;
-			if (g_layer_y + g_layer_h > 480)
-				g_layer_h = 480 - g_layer_y;
+			int layer_clipped = 0;
+			g_layer_x = max(-320, min(g_layer_x, 640));
+			g_layer_y = max(-240, min(g_layer_y, 400));
+			g_layer_w = max(160, g_layer_w);
+			g_layer_h = max( 60, g_layer_h);
+			if (g_layer_x < 0 || g_layer_x + g_layer_w > 800)
+				layer_clipped = 1;
+			if (g_layer_w > 800+400)
+				g_layer_w = 800+400;
+			if (g_layer_y < 0 || g_layer_y + g_layer_h > 480)
+				layer_clipped = 1;
+			if (g_layer_h > 480+360)
+				g_layer_h = 480+360;
 			// resize the layer
 			plat_gvideo_open(Config.PsxType);
+			if (layer_clipped || was_layer_clipped)
+				pl_vout_buf = plat_gvideo_set_mode(&last_vout_w,
+					&last_vout_h, &last_vout_bpp);
+			was_layer_clipped = layer_clipped;
 		}
 	}
 
 	plat_gvideo_close();
+	free(saved_layer);
 
 	return 0;
 }
 
 static menu_entry e_menu_gfx_options[] =
 {
+	mee_enum      ("Screen centering",         MA_OPT_CENTERING, pl_rearmed_cbs.screen_centering_type, men_centering),
 	mee_enum_h    ("Scaler",                   MA_OPT_VARSCALER, g_scaler, men_scaler, h_scaler),
 	mee_enum      ("Video output mode",        MA_OPT_VOUT_MODE, plat_target.vout_method, men_dummy),
 	mee_onoff     ("Software Scaling",         MA_OPT_SCALER2, soft_scaling, 1),
 	mee_enum      ("Hardware Filter",          MA_OPT_HWFILTER, plat_target.hwfilter, men_dummy),
 	mee_enum_h    ("Software Filter",          MA_OPT_SWFILTER, soft_filter, men_soft_filter, h_soft_filter),
 #ifdef __ARM_NEON__
-	mee_onoff     ("Scanlines",                MA_OPT_SCANLINES, scanlines, 1),
+	mee_enum      ("Scanlines",                MA_OPT_SCANLINES, scanlines, men_scanlines),
 	mee_range_h   ("Scanline brightness",      MA_OPT_SCANLINE_LEVEL, scanline_level, 0, 100, h_scanline_l),
 #endif
 	mee_range_h   ("Gamma adjustment",         MA_OPT_GAMMA, g_gamma, 1, 200, h_gamma),
@@ -1357,8 +1415,9 @@ static const char *men_gpu_interlace[] = { "Off", "On", "Auto", NULL };
 static menu_entry e_menu_plugin_gpu_neon[] =
 {
 	mee_enum      ("Enable interlace mode",      0, pl_rearmed_cbs.gpu_neon.allow_interlace, men_gpu_interlace),
-	mee_onoff_h   ("Enhanced resolution (slow)", 0, pl_rearmed_cbs.gpu_neon.enhancement_enable, 1, h_gpu_neon_enhanced),
+	mee_onoff_h   ("Enhanced resolution",        0, pl_rearmed_cbs.gpu_neon.enhancement_enable, 1, h_gpu_neon_enhanced),
 	mee_onoff_h   ("Enhanced res. speed hack",   0, pl_rearmed_cbs.gpu_neon.enhancement_no_main, 1, h_gpu_neon_enhanced_hack),
+	mee_onoff     ("Enh. res. texture adjust",   0, pl_rearmed_cbs.gpu_neon.enhancement_tex_adj, 1),
 	mee_end,
 };
 
@@ -1371,12 +1430,30 @@ static int menu_loop_plugin_gpu_neon(int id, int keys)
 
 #endif
 
+static menu_entry e_menu_plugin_gpu_unai_old[] =
+{
+	mee_onoff     ("Skip every 2nd line",        0, pl_rearmed_cbs.gpu_unai_old.lineskip, 1),
+	mee_onoff     ("Abe's Odyssey hack",         0, pl_rearmed_cbs.gpu_unai_old.abe_hack, 1),
+	mee_onoff     ("Disable lighting",           0, pl_rearmed_cbs.gpu_unai_old.no_light, 1),
+	mee_onoff     ("Disable blending",           0, pl_rearmed_cbs.gpu_unai_old.no_blend, 1),
+	mee_end,
+};
+
+static int menu_loop_plugin_gpu_unai_old(int id, int keys)
+{
+	int sel = 0;
+	me_loop(e_menu_plugin_gpu_unai_old, &sel);
+	return 0;
+}
+
 static menu_entry e_menu_plugin_gpu_unai[] =
 {
-	mee_onoff     ("Skip every 2nd line",        0, pl_rearmed_cbs.gpu_unai.lineskip, 1),
-	mee_onoff     ("Abe's Odyssey hack",         0, pl_rearmed_cbs.gpu_unai.abe_hack, 1),
-	mee_onoff     ("Disable lighting",           0, pl_rearmed_cbs.gpu_unai.no_light, 1),
-	mee_onoff     ("Disable blending",           0, pl_rearmed_cbs.gpu_unai.no_blend, 1),
+	mee_onoff     ("Interlace",                  0, pl_rearmed_cbs.gpu_unai.ilace_force, 1),
+	mee_onoff     ("Dithering",                  0, pl_rearmed_cbs.gpu_unai.dithering, 1),
+	mee_onoff     ("Lighting",                   0, pl_rearmed_cbs.gpu_unai.lighting, 1),
+	mee_onoff     ("Fast lighting",              0, pl_rearmed_cbs.gpu_unai.fast_lighting, 1),
+	mee_onoff     ("Blending",                   0, pl_rearmed_cbs.gpu_unai.blending, 1),
+	mee_onoff     ("Pixel skip",                 0, pl_rearmed_cbs.gpu_unai.pixel_skip, 1),
 	mee_end,
 };
 
@@ -1384,26 +1461,6 @@ static int menu_loop_plugin_gpu_unai(int id, int keys)
 {
 	int sel = 0;
 	me_loop(e_menu_plugin_gpu_unai, &sel);
-	return 0;
-}
-
-static menu_entry e_menu_plugin_gpu_senquack[] =
-{
-#if 0
-	mee_onoff     ("Interlace",                  0, pl_rearmed_cbs.gpu_senquack.ilace_force, 1),
-	mee_onoff     ("Dithering",                  0, pl_rearmed_cbs.gpu_senquack.dithering, 1),
-	mee_onoff     ("Lighting",                   0, pl_rearmed_cbs.gpu_senquack.lighting, 1),
-	mee_onoff     ("Fast lighting",              0, pl_rearmed_cbs.gpu_senquack.fast_lighting, 1),
-	mee_onoff     ("Blending",                   0, pl_rearmed_cbs.gpu_senquack.blending, 1),
-	mee_onoff     ("Pixel skip",                 0, pl_rearmed_cbs.gpu_senquack.pixel_skip, 1),
-#endif
-	mee_end,
-};
-
-static int menu_loop_plugin_gpu_senquack(int id, int keys)
-{
-	int sel = 0;
-	me_loop(e_menu_plugin_gpu_senquack, &sel);
 	return 0;
 }
 
@@ -1508,16 +1565,16 @@ static const char h_plugin_gpu[] =
 				   "builtin_gpu is the NEON GPU, very fast and accurate\n"
 #endif
 				   "gpu_peops is Pete's soft GPU, slow but accurate\n"
-				   "gpu_unai is GPU from PCSX4ALL, fast but glitchy\n"
-				   "gpu_senquack is more accurate but slower\n"
+				   "gpu_unai_old is from old PCSX4ALL, fast but glitchy\n"
+				   "gpu_unai is newer, more accurate but slower\n"
 				   "gpu_gles Pete's hw GPU, uses 3D chip but is glitchy\n"
 				   "must save config and reload the game if changed";
 static const char h_plugin_spu[] = "spunull effectively disables sound\n"
 				   "must save config and reload the game if changed";
 static const char h_gpu_peops[]  = "Configure P.E.Op.S. SoftGL Driver V1.17";
 static const char h_gpu_peopsgl[]= "Configure P.E.Op.S. MesaGL Driver V1.78";
-static const char h_gpu_unai[]   = "Configure Unai/PCSX4ALL Team GPU plugin";
-static const char h_gpu_senquack[]   = "Configure Unai/PCSX4ALL Senquack plugin";
+static const char h_gpu_unai_old[] = "Configure Unai/PCSX4ALL Team GPU plugin (old)";
+static const char h_gpu_unai[]   = "Configure Unai/PCSX4ALL Team plugin (new)";
 static const char h_spu[]        = "Configure built-in P.E.Op.S. Sound Driver V1.7";
 
 static menu_entry e_menu_plugin_options[] =
@@ -1529,8 +1586,8 @@ static menu_entry e_menu_plugin_options[] =
 	mee_handler_h ("Configure built-in GPU plugin", menu_loop_plugin_gpu_neon, h_gpu_neon),
 #endif
 	mee_handler_h ("Configure gpu_peops plugin",    menu_loop_plugin_gpu_peops, h_gpu_peops),
+	mee_handler_h ("Configure gpu_unai_old GPU plugin", menu_loop_plugin_gpu_unai_old, h_gpu_unai_old),
 	mee_handler_h ("Configure gpu_unai GPU plugin", menu_loop_plugin_gpu_unai, h_gpu_unai),
-	mee_handler_h ("Configure gpu_senquack GPU plugin", menu_loop_plugin_gpu_senquack, h_gpu_senquack),
 	mee_handler_h ("Configure gpu_gles GPU plugin", menu_loop_plugin_gpu_peopsgl, h_gpu_peopsgl),
 	mee_handler_h ("Configure built-in SPU plugin", menu_loop_plugin_spu, h_spu),
 	mee_end,
@@ -1583,7 +1640,7 @@ static int menu_loop_speed_hacks(int id, int keys)
 	return 0;
 }
 
-static const char *men_gpul[]    = { "Auto", "Off", "On", NULL };
+static const char *men_autooo[]  = { "Auto", "Off", "On", NULL };
 
 static const char h_cfg_cpul[]   = "Shows CPU usage in %";
 static const char h_cfg_spu[]    = "Shows active SPU channels\n"
@@ -1598,12 +1655,17 @@ static const char h_cfg_nodrc[]  = "Disable dynamic recompiler and use interpret
 #endif
 static const char h_cfg_shacks[] = "Breaks games but may give better performance";
 static const char h_cfg_icache[] = "Support F1 games (only when dynarec is off)";
-static const char h_cfg_gpul[]   = "Try enabling this if the game is missing some graphics\n"
+static const char h_cfg_exc[]    = "Emulate some PSX's debug hw like breakpoints\n"
+				   "and exceptions (slow, interpreter only, keep off)";
+static const char h_cfg_gpul[]   = "Try enabling this if the game misses some graphics\n"
 				   "causes a performance hit";
+static const char h_cfg_ffps[]   = "Instead of 50/60fps for PAL/NTSC use ~49.75/59.81\n"
+				   "Closer to real hw but doesn't match modern displays.";
+static const char h_cfg_tcd[]    = "Greatly reduce CD load times. Breaks some games.";
 static const char h_cfg_psxclk[]  = "Over/under-clock the PSX, default is " DEFAULT_PSX_CLOCK_S "\n"
 				    "(adjust this if the game is too slow/too fast/hangs)";
 
-enum { AMO_XA, AMO_CDDA, AMO_IC, AMO_CPU, AMO_GPUL };
+enum { AMO_XA, AMO_CDDA, AMO_IC, AMO_BP, AMO_CPU, AMO_GPUL, AMO_FFPS, AMO_TCD };
 
 static menu_entry e_menu_adv_options[] =
 {
@@ -1613,7 +1675,10 @@ static menu_entry e_menu_adv_options[] =
 	mee_onoff_h   ("Disable XA Decoding",    0, menu_iopts[AMO_XA],   1, h_cfg_xa),
 	mee_onoff_h   ("Disable CD Audio",       0, menu_iopts[AMO_CDDA], 1, h_cfg_cdda),
 	mee_onoff_h   ("ICache emulation",       0, menu_iopts[AMO_IC],   1, h_cfg_icache),
-	mee_enum_h    ("GPU l-list slow walking",0, menu_iopts[AMO_GPUL], men_gpul, h_cfg_gpul),
+	mee_onoff_h   ("BP exception emulation", 0, menu_iopts[AMO_BP],   1, h_cfg_exc),
+	mee_enum_h    ("GPU l-list slow walking",0, menu_iopts[AMO_GPUL], men_autooo, h_cfg_gpul),
+	mee_enum_h    ("Fractional framerate",   0, menu_iopts[AMO_FFPS], men_autooo, h_cfg_ffps),
+	mee_onoff_h   ("Turbo CD-ROM ",          0, menu_iopts[AMO_TCD], 1, h_cfg_tcd),
 #if !defined(DRC_DISABLE) || defined(LIGHTREC)
 	mee_onoff_h   ("Disable dynarec (slow!)",0, menu_iopts[AMO_CPU],  1, h_cfg_nodrc),
 #endif
@@ -1632,18 +1697,22 @@ static int menu_loop_adv_options(int id, int keys)
 		{ &Config.Xa,      &menu_iopts[AMO_XA] },
 		{ &Config.Cdda,    &menu_iopts[AMO_CDDA] },
 		{ &Config.icache_emulation, &menu_iopts[AMO_IC] },
+		{ &Config.PreciseExceptions, &menu_iopts[AMO_BP] },
 		{ &Config.Cpu,     &menu_iopts[AMO_CPU] },
+		{ &Config.TurboCD, &menu_iopts[AMO_TCD] },
 	};
 	int i;
 	for (i = 0; i < ARRAY_SIZE(opts); i++)
 		*opts[i].mopt = *opts[i].opt;
 	menu_iopts[AMO_GPUL] = Config.GpuListWalking + 1;
+	menu_iopts[AMO_FFPS] = Config.FractionalFramerate + 1;
 
 	me_loop(e_menu_adv_options, &sel);
 
 	for (i = 0; i < ARRAY_SIZE(opts); i++)
 		*opts[i].opt = *opts[i].mopt;
 	Config.GpuListWalking = menu_iopts[AMO_GPUL] - 1;
+	Config.FractionalFramerate = menu_iopts[AMO_FFPS] - 1;
 
 	return 0;
 }
@@ -1667,6 +1736,7 @@ static const char h_confirm_save[]    = "Ask for confirmation when overwriting s
 static const char h_restore_def[]     = "Switches back to default / recommended\n"
 					"configuration";
 static const char h_frameskip[]       = "Warning: frameskip sometimes causes glitches\n";
+static const char h_sputhr[]          = "Warning: has some known bugs\n";
 
 static menu_entry e_menu_options[] =
 {
@@ -1677,9 +1747,9 @@ static menu_entry e_menu_options[] =
 	mee_enum      ("Region",                   0, region, men_region),
 	mee_range     ("CPU clock",                MA_OPT_CPU_CLOCKS, cpu_clock, 20, 5000),
 #ifdef C64X_DSP
-	mee_onoff     ("Use C64x DSP for sound",   MA_OPT_SPU_THREAD, spu_config.iUseThread, 1),
+	mee_onoff_h   ("Use C64x DSP for sound",   MA_OPT_SPU_THREAD, spu_config.iUseThread, 1, h_sputhr),
 #else
-	mee_onoff     ("Threaded SPU",             MA_OPT_SPU_THREAD, spu_config.iUseThread, 1),
+	mee_onoff_h   ("Threaded SPU",             MA_OPT_SPU_THREAD, spu_config.iUseThread, 1, h_sputhr),
 #endif
 	mee_handler_id("[Display]",                MA_OPT_DISP_OPTS, menu_loop_gfx_options),
 	mee_handler   ("[BIOS/Plugins]",           menu_loop_plugin_options),
@@ -2008,15 +2078,12 @@ static const char credits_text[] =
 
 static int reset_game(void)
 {
-	// sanity check
-	if (bios_sel == 0 && !Config.HLE)
-		return -1;
-
 	ClosePlugins();
 	OpenPlugins();
 	SysReset();
-	if (CheckCdrom() != -1) {
-		LoadCdrom();
+	if (Config.HLE) {
+		if (LoadCdrom() == -1)
+			return -1;
 	}
 	return 0;
 }
@@ -2046,13 +2113,17 @@ static int reload_plugins(const char *cdimg)
 
 static int run_bios(void)
 {
+	boolean origSlowBoot = Config.SlowBoot;
+
 	if (bios_sel == 0)
 		return -1;
 
 	ready_to_go = 0;
 	if (reload_plugins(NULL) != 0)
 		return -1;
+	Config.SlowBoot = 1;
 	SysReset();
+	Config.SlowBoot = origSlowBoot;
 
 	ready_to_go = 1;
 	return 0;
@@ -2438,7 +2509,8 @@ static void scan_bios_plugins(void)
 			continue;
 
 		snprintf(fname, sizeof(fname), "%s/%s", Config.BiosDir, ent->d_name);
-		if (stat(fname, &st) != 0 || st.st_size != 512*1024) {
+		if (stat(fname, &st) != 0
+		    || (st.st_size != 512*1024 && st.st_size != 4*1024*1024)) {
 			printf("bad BIOS file: %s\n", ent->d_name);
 			continue;
 		}
@@ -2575,7 +2647,7 @@ void menu_init(void)
 
 	i = plat_target.cpu_clock_set != NULL
 		&& plat_target.cpu_clock_get != NULL && cpu_clock_st > 0;
-	me_enable(e_menu_gfx_options, MA_OPT_CPU_CLOCKS, i);
+	me_enable(e_menu_options, MA_OPT_CPU_CLOCKS, i);
 
 	i = me_id2offset(e_menu_gfx_options, MA_OPT_VOUT_MODE);
 	e_menu_gfx_options[i].data = plat_target.vout_methods;
@@ -2656,10 +2728,11 @@ void menu_prepare_emu(void)
 	psxCpu = &psxInt;
 	#endif
 	if (psxCpu != prev_cpu) {
+		prev_cpu->Notify(R3000ACPU_NOTIFY_BEFORE_SAVE, NULL);
 		prev_cpu->Shutdown();
 		psxCpu->Init();
-		// note that this does not really reset, just clears drc caches
 		psxCpu->Reset();
+		psxCpu->Notify(R3000ACPU_NOTIFY_AFTER_LOAD, NULL);
 	}
 
 	menu_sync_config();
@@ -2681,8 +2754,6 @@ void menu_prepare_emu(void)
 		if (ret)
 			fprintf(stderr, "Warning: GPU_open returned %d\n", ret);
 	}
-
-	dfinput_activate();
 }
 
 void menu_update_msg(const char *msg)

@@ -28,6 +28,21 @@ extern "C" {
 #   define __api
 #endif
 
+#ifndef __cnst
+#   ifdef __GNUC__
+#	define __cnst __attribute__((const))
+#   else
+#	define __cnst
+#   endif
+#endif
+#ifndef __pure
+#   ifdef __GNUC__
+#	define __pure __attribute__((pure))
+#   else
+#	define __pure
+#   endif
+#endif
+
 typedef uint64_t u64;
 typedef uint32_t u32;
 typedef uint16_t u16;
@@ -48,6 +63,11 @@ struct lightrec_mem_map;
 #define LIGHTREC_EXIT_SYSCALL	(1 << 2)
 #define LIGHTREC_EXIT_SEGFAULT	(1 << 3)
 #define LIGHTREC_EXIT_NOMEM	(1 << 4)
+#define LIGHTREC_EXIT_UNKNOWN_OP	(1 << 5)
+
+/* Unsafe optimizations flags */
+#define LIGHTREC_OPT_INV_DMA_ONLY	(1 << 0)
+#define LIGHTREC_OPT_SP_GP_HIT_RAM	(1 << 1)
 
 enum psx_map {
 	PSX_MAP_KERNEL_USER_RAM,
@@ -60,20 +80,24 @@ enum psx_map {
 	PSX_MAP_MIRROR2,
 	PSX_MAP_MIRROR3,
 	PSX_MAP_CODE_BUFFER,
+	PSX_MAP_PPORT_MIRROR,
 
 	PSX_MAP_UNKNOWN,
 };
 
 struct lightrec_mem_map_ops {
 	void (*sb)(struct lightrec_state *, u32 opcode,
-		   void *host, u32 addr, u8 data);
+		   void *host, u32 addr, u32 data);
 	void (*sh)(struct lightrec_state *, u32 opcode,
-		   void *host, u32 addr, u16 data);
+		   void *host, u32 addr, u32 data);
 	void (*sw)(struct lightrec_state *, u32 opcode,
 		   void *host, u32 addr, u32 data);
 	u8 (*lb)(struct lightrec_state *, u32 opcode, void *host, u32 addr);
 	u16 (*lh)(struct lightrec_state *, u32 opcode, void *host, u32 addr);
 	u32 (*lw)(struct lightrec_state *, u32 opcode, void *host, u32 addr);
+	u32 (*lwu)(struct lightrec_state *, u32 opcode, void *host, u32 addr);
+	void (*swu)(struct lightrec_state *, u32 opcode,
+		    void *host, u32 addr, u32 data);
 };
 
 struct lightrec_mem_map {
@@ -113,18 +137,20 @@ __api u32 lightrec_run_interpreter(struct lightrec_state *state,
 
 __api void lightrec_invalidate(struct lightrec_state *state, u32 addr, u32 len);
 __api void lightrec_invalidate_all(struct lightrec_state *state);
-__api void lightrec_set_invalidate_mode(struct lightrec_state *state,
-					_Bool dma_only);
 
 __api void lightrec_set_exit_flags(struct lightrec_state *state, u32 flags);
 __api u32 lightrec_exit_flags(struct lightrec_state *state);
 
-__api struct lightrec_registers * lightrec_get_registers(struct lightrec_state *state);
+__api void lightrec_set_unsafe_opt_flags(struct lightrec_state *state, u32 flags);
+
+__api __cnst struct lightrec_registers *
+lightrec_get_registers(struct lightrec_state *state);
 
 __api u32 lightrec_current_cycle_count(const struct lightrec_state *state);
 __api void lightrec_reset_cycle_count(struct lightrec_state *state, u32 cycles);
 __api void lightrec_set_target_cycle_count(struct lightrec_state *state,
 					   u32 cycles);
+__api void lightrec_set_cycles_per_opcode(struct lightrec_state *state, u32 cycles);
 
 #ifdef __cplusplus
 };

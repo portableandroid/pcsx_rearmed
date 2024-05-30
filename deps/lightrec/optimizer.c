@@ -114,7 +114,11 @@ static u64 opcode_read_mask(union code op)
 	case OP_SWL:
 	case OP_SW:
 	case OP_SWR:
+	case OP_META_LWU:
+	case OP_META_SWU:
 		return BIT(op.i.rs) | BIT(op.i.rt);
+	case OP_META:
+		return BIT(op.m.rs);
 	default:
 		return BIT(op.i.rs);
 	}
@@ -139,12 +143,14 @@ static u64 mult_div_write_mask(union code op)
 	return flags;
 }
 
-static u64 opcode_write_mask(union code op)
+u64 opcode_write_mask(union code op)
 {
 	switch (op.i.op) {
 	case OP_META_MULT2:
 	case OP_META_MULTU2:
 		return mult_div_write_mask(op);
+	case OP_META:
+		return BIT(op.m.rd);
 	case OP_SPECIAL:
 		switch (op.r.op) {
 		case OP_SPECIAL_JR:
@@ -182,8 +188,7 @@ static u64 opcode_write_mask(union code op)
 	case OP_LBU:
 	case OP_LHU:
 	case OP_LWR:
-	case OP_META_EXTC:
-	case OP_META_EXTS:
+	case OP_META_LWU:
 		return BIT(op.i.rt);
 	case OP_JAL:
 		return BIT(31);
@@ -214,8 +219,6 @@ static u64 opcode_write_mask(union code op)
 		default:
 			return 0;
 		}
-	case OP_META_MOV:
-		return BIT(op.r.rd);
 	default:
 		return 0;
 	}
@@ -296,6 +299,9 @@ static bool reg_is_dead(const struct opcode *list, unsigned int offset, u8 reg)
 		if (opcode_writes_register(list[i].c, reg))
 			return true;
 
+		if (is_syscall(list[i].c))
+			return false;
+
 		if (has_delay_slot(list[i].c)) {
 			if (op_flag_no_ds(list[i].flags) ||
 			    opcode_reads_register(list[i + 1].c, reg))
@@ -339,6 +345,38 @@ static bool reg_is_read_or_written(const struct opcode *list,
 	return reg_is_read(list, a, b, reg) || reg_is_written(list, a, b, reg);
 }
 
+static bool opcode_is_mfc(union code op)
+{
+	switch (op.i.op) {
+	case OP_CP0:
+		switch (op.r.rs) {
+		case OP_CP0_MFC0:
+		case OP_CP0_CFC0:
+			return true;
+		default:
+			break;
+		}
+
+		break;
+	case OP_CP2:
+		if (op.r.op == OP_CP2_BASIC) {
+			switch (op.r.rs) {
+			case OP_CP2_BASIC_MFC2:
+			case OP_CP2_BASIC_CFC2:
+				return true;
+			default:
+				break;
+			}
+		}
+
+		break;
+	default:
+		break;
+	}
+
+	return false;
+}
+
 static bool opcode_is_load(union code op)
 {
 	switch (op.i.op) {
@@ -350,6 +388,7 @@ static bool opcode_is_load(union code op)
 	case OP_LHU:
 	case OP_LWR:
 	case OP_LWC2:
+	case OP_META_LWU:
 		return true;
 	default:
 		return false;
@@ -365,10 +404,17 @@ static bool opcode_is_store(union code op)
 	case OP_SWL:
 	case OP_SWR:
 	case OP_SWC2:
+	case OP_META_SWU:
 		return true;
 	default:
 		return false;
 	}
+}
+
+bool opcode_has_load_delay(union code op)
+{
+	return (opcode_is_load(op) && op.i.rt && op.i.op != OP_LWC2)
+		|| opcode_is_mfc(op);
 }
 
 static u8 opcode_get_io_size(union code op)
@@ -406,6 +452,7 @@ static bool is_nop(union code op)
 		case OP_LBU:
 		case OP_LHU:
 		case OP_LWR:
+		case OP_META_LWU:
 			return false;
 		default:
 			return true;
@@ -454,46 +501,6 @@ static bool is_nop(union code op)
 	default:
 		return false;
 	}
-}
-
-bool load_in_delay_slot(union code op)
-{
-	switch (op.i.op) {
-	case OP_CP0:
-		switch (op.r.rs) {
-		case OP_CP0_MFC0:
-		case OP_CP0_CFC0:
-			return true;
-		default:
-			break;
-		}
-
-		break;
-	case OP_CP2:
-		if (op.r.op == OP_CP2_BASIC) {
-			switch (op.r.rs) {
-			case OP_CP2_BASIC_MFC2:
-			case OP_CP2_BASIC_CFC2:
-				return true;
-			default:
-				break;
-			}
-		}
-
-		break;
-	case OP_LB:
-	case OP_LH:
-	case OP_LW:
-	case OP_LWL:
-	case OP_LWR:
-	case OP_LBU:
-	case OP_LHU:
-		return true;
-	default:
-		break;
-	}
-
-	return false;
 }
 
 static void lightrec_optimize_sll_sra(struct opcode *list, unsigned int offset,
@@ -592,9 +599,10 @@ static void lightrec_optimize_sll_sra(struct opcode *list, unsigned int offset,
 				ldop->i.rt = next->r.rd;
 				to_change->opcode = 0;
 			} else {
-				to_change->i.op = OP_META_MOV;
-				to_change->r.rd = next->r.rd;
-				to_change->r.rs = ldop->i.rt;
+				to_change->i.op = OP_META;
+				to_change->m.op = OP_META_MOV;
+				to_change->m.rd = next->r.rd;
+				to_change->m.rs = ldop->i.rt;
 			}
 
 			if (to_nop->r.imm == 24)
@@ -603,7 +611,7 @@ static void lightrec_optimize_sll_sra(struct opcode *list, unsigned int offset,
 				pr_debug("Convert LHU+SLL+SRA to LH\n");
 
 			v[ldop->i.rt].known = 0;
-			v[ldop->i.rt].sign = 0xffffff80 << 24 - curr->r.imm;
+			v[ldop->i.rt].sign = 0xffffff80 << (24 - curr->r.imm);
 		}
 	}
 
@@ -611,18 +619,9 @@ static void lightrec_optimize_sll_sra(struct opcode *list, unsigned int offset,
 		pr_debug("Convert SLL/SRA #%u to EXT%c\n",
 			 curr->r.imm, curr->r.imm == 24 ? 'C' : 'S');
 
-		if (to_change == curr) {
-			to_change->i.rs = curr->r.rt;
-			to_change->i.rt = next->r.rd;
-		} else {
-			to_change->i.rt = next->r.rd;
-			to_change->i.rs = curr->r.rt;
-		}
-
-		if (to_nop->r.imm == 24)
-			to_change->i.op = OP_META_EXTC;
-		else
-			to_change->i.op = OP_META_EXTS;
+		to_change->m.rs = curr->r.rt;
+		to_change->m.op = to_nop->r.imm == 24 ? OP_META_EXTC : OP_META_EXTS;
+		to_change->i.op = OP_META;
 	}
 
 	to_nop->opcode = 0;
@@ -643,7 +642,7 @@ lightrec_remove_useless_lui(struct block *block, unsigned int offset,
 		return;
 	}
 
-	if (op->i.imm != 0 || op->i.rt == 0 || offset == block->nb_ops - 1)
+	if (op->i.imm != 0 || op->i.rt == 0 || is_delay_slot(list, offset))
 		return;
 
 	reader = find_next_reader(list, offset + 1, op->i.rt);
@@ -663,6 +662,31 @@ lightrec_remove_useless_lui(struct block *block, unsigned int offset,
 	}
 }
 
+static void lightrec_lui_to_movi(struct block *block, unsigned int offset)
+{
+	struct opcode *ori, *lui = &block->opcode_list[offset];
+	int next;
+
+	if (lui->i.op != OP_LUI)
+		return;
+
+	next = find_next_reader(block->opcode_list, offset + 1, lui->i.rt);
+	if (next > 0) {
+		ori = &block->opcode_list[next];
+
+		switch (ori->i.op) {
+		case OP_ORI:
+		case OP_ADDI:
+		case OP_ADDIU:
+			if (ori->i.rs == ori->i.rt && ori->i.imm) {
+				ori->flags |= LIGHTREC_MOVI;
+				lui->flags |= LIGHTREC_MOVI;
+			}
+			break;
+		}
+	}
+}
+
 static void lightrec_modify_lui(struct block *block, unsigned int offset)
 {
 	union code c, *lui = &block->opcode_list[offset].c;
@@ -678,8 +702,14 @@ static void lightrec_modify_lui(struct block *block, unsigned int offset)
 			break;
 
 		if (opcode_writes_register(c, lui->i.rt)) {
+			if (c.i.op == OP_LWL || c.i.op == OP_LWR) {
+				/* LWL/LWR only partially write their target register;
+				 * therefore the LUI should not write a different value. */
+				break;
+			}
+
 			pr_debug("Convert LUI at offset 0x%x to kuseg\n",
-				 i - 1 << 2);
+				 (i - 1) << 2);
 			lui->i.imm = kunseg(lui->i.imm << 16) >> 16;
 			break;
 		}
@@ -796,19 +826,18 @@ static void lightrec_patch_known_zero(struct opcode *op,
 	case OP_ANDI:
 	case OP_ORI:
 	case OP_XORI:
-	case OP_META_MOV:
-	case OP_META_EXTC:
-	case OP_META_EXTS:
 	case OP_META_MULT2:
 	case OP_META_MULTU2:
-		if (is_known_zero(v, op->i.rs))
-			op->i.rs = 0;
+	case OP_META:
+		if (is_known_zero(v, op->m.rs))
+			op->m.rs = 0;
 		break;
 	case OP_SB:
 	case OP_SH:
 	case OP_SWL:
 	case OP_SW:
 	case OP_SWR:
+	case OP_META_SWU:
 		if (is_known_zero(v, op->i.rt))
 			op->i.rt = 0;
 		fallthrough;
@@ -821,6 +850,7 @@ static void lightrec_patch_known_zero(struct opcode *op,
 	case OP_LWR:
 	case OP_LWC2:
 	case OP_SWC2:
+	case OP_META_LWU:
 		if (is_known(v, op->i.rs)
 		    && kunseg(v[op->i.rs].value) == 0)
 			op->i.rs = 0;
@@ -842,11 +872,22 @@ static void lightrec_reset_syncs(struct block *block)
 	for (i = 0; i < block->nb_ops; i++) {
 		op = &list[i];
 
-		if (op_flag_local_branch(op->flags) && has_delay_slot(op->c)) {
-			offset = i + 1 + (s16)op->i.imm;
-			list[offset].flags |= LIGHTREC_SYNC;
+		if (has_delay_slot(op->c)) {
+			if (op_flag_local_branch(op->flags)) {
+				offset = i + 1 - op_flag_no_ds(op->flags) + (s16)op->i.imm;
+				list[offset].flags |= LIGHTREC_SYNC;
+			}
+
+			if (op_flag_emulate_branch(op->flags) && i + 2 < block->nb_ops)
+				list[i + 2].flags |= LIGHTREC_SYNC;
 		}
 	}
+}
+
+static void maybe_remove_load_delay(struct opcode *op)
+{
+	if (op_flag_load_delay(op->flags) && opcode_is_load(op->c))
+		op->flags &= ~LIGHTREC_LOAD_DELAY;
 }
 
 static int lightrec_transform_ops(struct lightrec_state *state, struct block *block)
@@ -855,12 +896,13 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 	struct constprop_data v[32] = LIGHTREC_CONSTPROP_INITIALIZER;
 	unsigned int i;
 	bool local;
+	int idx;
 	u8 tmp;
 
 	for (i = 0; i < block->nb_ops; i++) {
 		op = &list[i];
 
-		lightrec_consts_propagate(list, i, v);
+		lightrec_consts_propagate(block, i, v);
 
 		lightrec_patch_known_zero(op, v);
 
@@ -889,6 +931,9 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 				   (v[op->i.rs].value ^ v[op->i.rt].value)) {
 				pr_debug("Found never-taken BEQ\n");
 
+				if (!op_flag_no_ds(op->flags))
+					maybe_remove_load_delay(&list[i + 1]);
+
 				local = op_flag_local_branch(op->flags);
 				op->opcode = 0;
 				op->flags = 0;
@@ -912,6 +957,9 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 			} else if (is_known(v, op->i.rs) && is_known(v, op->i.rt) &&
 				   v[op->i.rs].value == v[op->i.rt].value) {
 				pr_debug("Found never-taken BNE\n");
+
+				if (!op_flag_no_ds(op->flags))
+					maybe_remove_load_delay(&list[i + 1]);
 
 				local = op_flag_local_branch(op->flags);
 				op->opcode = 0;
@@ -941,6 +989,9 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 			    v[op->i.rs].value & BIT(31)) {
 				pr_debug("Found never-taken BGTZ\n");
 
+				if (!op_flag_no_ds(op->flags))
+					maybe_remove_load_delay(&list[i + 1]);
+
 				local = op_flag_local_branch(op->flags);
 				op->opcode = 0;
 				op->flags = 0;
@@ -951,9 +1002,11 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 			break;
 
 		case OP_LUI:
-			if (i == 0 || !has_delay_slot(list[i - 1].c))
+			if (!is_delay_slot(list, i))
 				lightrec_modify_lui(block, i);
 			lightrec_remove_useless_lui(block, i, v);
+			if (!is_delay_slot(list, i))
+				lightrec_lui_to_movi(block, i);
 			break;
 
 		/* Transform ORI/ADDI/ADDIU with imm #0 or ORR/ADD/ADDU/SUB/SUBU
@@ -963,8 +1016,9 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 		case OP_ADDIU:
 			if (op->i.imm == 0) {
 				pr_debug("Convert ORI/ADDI/ADDIU #0 to MOV\n");
-				op->i.op = OP_META_MOV;
-				op->r.rd = op->i.rt;
+				op->m.rd = op->i.rt;
+				op->m.op = OP_META_MOV;
+				op->i.op = OP_META;
 			}
 			break;
 		case OP_ANDI:
@@ -974,8 +1028,43 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 				if (op->i.rs == op->i.rt) {
 					op->opcode = 0;
 				} else {
-					op->i.op = OP_META_MOV;
-					op->r.rd = op->i.rt;
+					op->m.rd = op->i.rt;
+					op->m.op = OP_META_MOV;
+					op->i.op = OP_META;
+				}
+			}
+			break;
+		case OP_LWL:
+		case OP_LWR:
+			if (i == 0 || !has_delay_slot(list[i - 1].c)) {
+				idx = find_next_reader(list, i + 1, op->i.rt);
+				if (idx > 0 && list[idx].i.op == (op->i.op ^ 0x4)
+				    && list[idx].i.rs == op->i.rs
+				    && list[idx].i.rt == op->i.rt
+				    && abs((s16)op->i.imm - (s16)list[idx].i.imm) == 3) {
+					/* Replace a LWL/LWR combo with a META_LWU */
+					if (op->i.op == OP_LWL)
+						op->i.imm -= 3;
+					op->i.op = OP_META_LWU;
+					list[idx].opcode = 0;
+					pr_debug("Convert LWL/LWR to LWU\n");
+				}
+			}
+			break;
+		case OP_SWL:
+		case OP_SWR:
+			if (i == 0 || !has_delay_slot(list[i - 1].c)) {
+				idx = find_next_reader(list, i + 1, op->i.rt);
+				if (idx > 0 && list[idx].i.op == (op->i.op ^ 0x4)
+				    && list[idx].i.rs == op->i.rs
+				    && list[idx].i.rt == op->i.rt
+				    && abs((s16)op->i.imm - (s16)list[idx].i.imm) == 3) {
+					/* Replace a SWL/SWR combo with a META_SWU */
+					if (op->i.op == OP_SWL)
+						op->i.imm -= 3;
+					op->i.op = OP_META_SWU;
+					list[idx].opcode = 0;
+					pr_debug("Convert SWL/SWR to SWU\n");
 				}
 			}
 			break;
@@ -994,6 +1083,9 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 					op->i.rt = 0;
 				} else {
 					pr_debug("Found never-taken BLTZ/BGEZ\n");
+
+					if (!op_flag_no_ds(op->flags))
+						maybe_remove_load_delay(&list[i + 1]);
 
 					local = op_flag_local_branch(op->flags);
 					op->opcode = 0;
@@ -1023,8 +1115,9 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 			case OP_SPECIAL_SRA:
 				if (op->r.imm == 0) {
 					pr_debug("Convert SRA #0 to MOV\n");
-					op->i.op = OP_META_MOV;
-					op->r.rs = op->r.rt;
+					op->m.rs = op->r.rt;
+					op->m.op = OP_META_MOV;
+					op->i.op = OP_META;
 					break;
 				}
 				break;
@@ -1041,8 +1134,9 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 			case OP_SPECIAL_SLL:
 				if (op->r.imm == 0) {
 					pr_debug("Convert SLL #0 to MOV\n");
-					op->i.op = OP_META_MOV;
-					op->r.rs = op->r.rt;
+					op->m.rs = op->r.rt;
+					op->m.op = OP_META_MOV;
+					op->i.op = OP_META;
 				}
 
 				lightrec_optimize_sll_sra(block->opcode_list, i, v);
@@ -1060,8 +1154,9 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 			case OP_SPECIAL_SRL:
 				if (op->r.imm == 0) {
 					pr_debug("Convert SRL #0 to MOV\n");
-					op->i.op = OP_META_MOV;
-					op->r.rs = op->r.rt;
+					op->m.rs = op->r.rt;
+					op->m.op = OP_META_MOV;
+					op->i.op = OP_META;
 				}
 				break;
 
@@ -1087,20 +1182,31 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 
 				op->r.op = ctz32(v[op->r.rt].value);
 				break;
+			case OP_SPECIAL_NOR:
+				if (op->r.rs == 0 || op->r.rt == 0) {
+					pr_debug("Convert NOR $zero to COM\n");
+					op->i.op = OP_META;
+					op->m.op = OP_META_COM;
+					if (!op->m.rs)
+						op->m.rs = op->r.rt;
+				}
+				break;
 			case OP_SPECIAL_OR:
 			case OP_SPECIAL_ADD:
 			case OP_SPECIAL_ADDU:
 				if (op->r.rs == 0) {
 					pr_debug("Convert OR/ADD $zero to MOV\n");
-					op->i.op = OP_META_MOV;
-					op->r.rs = op->r.rt;
+					op->m.rs = op->r.rt;
+					op->m.op = OP_META_MOV;
+					op->i.op = OP_META;
 				}
 				fallthrough;
 			case OP_SPECIAL_SUB:
 			case OP_SPECIAL_SUBU:
 				if (op->r.rt == 0) {
 					pr_debug("Convert OR/ADD/SUB $zero to MOV\n");
-					op->i.op = OP_META_MOV;
+					op->m.op = OP_META_MOV;
+					op->i.op = OP_META;
 				}
 				fallthrough;
 			default:
@@ -1197,6 +1303,9 @@ static int lightrec_switch_delay_slots(struct lightrec_state *state, struct bloc
 		if (op_flag_sync(next->flags))
 			continue;
 
+		if (op_flag_load_delay(next->flags) && opcode_is_load(next_op))
+			continue;
+
 		if (!lightrec_can_switch_delay_slot(list->c, next_op))
 			continue;
 
@@ -1214,52 +1323,20 @@ static int lightrec_switch_delay_slots(struct lightrec_state *state, struct bloc
 	return 0;
 }
 
-static int shrink_opcode_list(struct lightrec_state *state, struct block *block, u16 new_size)
-{
-	struct opcode_list *list, *old_list;
-
-	if (new_size >= block->nb_ops) {
-		pr_err("Invalid shrink size (%u vs %u)\n",
-		       new_size, block->nb_ops);
-		return -EINVAL;
-	}
-
-	list = lightrec_malloc(state, MEM_FOR_IR,
-			       sizeof(*list) + sizeof(struct opcode) * new_size);
-	if (!list) {
-		pr_err("Unable to allocate memory\n");
-		return -ENOMEM;
-	}
-
-	old_list = container_of(block->opcode_list, struct opcode_list, ops);
-	memcpy(list->ops, old_list->ops, sizeof(struct opcode) * new_size);
-
-	lightrec_free_opcode_list(state, block->opcode_list);
-	list->nb_ops = new_size;
-	block->nb_ops = new_size;
-	block->opcode_list = list->ops;
-
-	pr_debug("Shrunk opcode list of block PC 0x%08x to %u opcodes\n",
-		 block->pc, new_size);
-
-	return 0;
-}
-
 static int lightrec_detect_impossible_branches(struct lightrec_state *state,
 					       struct block *block)
 {
 	struct opcode *op, *list = block->opcode_list, *next = &list[0];
 	unsigned int i;
 	int ret = 0;
-	s16 offset;
 
 	for (i = 0; i < block->nb_ops - 1; i++) {
 		op = next;
 		next = &list[i + 1];
 
 		if (!has_delay_slot(op->c) ||
-		    (!load_in_delay_slot(next->c) &&
-		     !has_delay_slot(next->c) &&
+		    (!has_delay_slot(next->c) &&
+		     !opcode_is_mfc(next->c) &&
 		     !(next->i.op == OP_CP0 && next->r.rs == OP_CP0_RFE)))
 			continue;
 
@@ -1270,40 +1347,128 @@ static int lightrec_detect_impossible_branches(struct lightrec_state *state,
 			continue;
 		}
 
-		offset = i + 1 + (s16)op->i.imm;
-		if (load_in_delay_slot(next->c) &&
-		    (offset >= 0 && offset < block->nb_ops) &&
-		    !opcode_reads_register(list[offset].c, next->c.i.rt)) {
-			/* The 'impossible' branch is a local branch - we can
-			 * verify here that the first opcode of the target does
-			 * not use the target register of the delay slot */
-
-			pr_debug("Branch at offset 0x%x has load delay slot, "
-				 "but is local and dest opcode does not read "
-				 "dest register\n", i << 2);
-			continue;
-		}
-
 		op->flags |= LIGHTREC_EMULATE_BRANCH;
 
-		if (op == list) {
-			pr_debug("First opcode of block PC 0x%08x is an impossible branch\n",
-				 block->pc);
-
-			/* If the first opcode is an 'impossible' branch, we
-			 * only keep the first two opcodes of the block (the
-			 * branch itself + its delay slot) */
-			if (block->nb_ops > 2)
-				ret = shrink_opcode_list(state, block, 2);
-			break;
+		if (OPT_LOCAL_BRANCHES && i + 2 < block->nb_ops) {
+			/* The interpreter will only emulate the branch, then
+			 * return to the compiled code. Add a SYNC after the
+			 * branch + delay slot in the case where the branch
+			 * was not taken. */
+			list[i + 2].flags |= LIGHTREC_SYNC;
 		}
 	}
 
 	return ret;
 }
 
+static bool is_local_branch(const struct block *block, unsigned int idx)
+{
+	const struct opcode *op = &block->opcode_list[idx];
+	s32 offset;
+
+	switch (op->c.i.op) {
+	case OP_BEQ:
+	case OP_BNE:
+	case OP_BLEZ:
+	case OP_BGTZ:
+	case OP_REGIMM:
+		offset = idx + 1 + (s16)op->c.i.imm;
+		if (offset >= 0 && offset < block->nb_ops)
+			return true;
+		fallthrough;
+	default:
+		return false;
+	}
+}
+
+static int lightrec_handle_load_delays(struct lightrec_state *state,
+				       struct block *block)
+{
+	struct opcode *op, *list = block->opcode_list;
+	unsigned int i;
+	s16 imm;
+
+	for (i = 0; i < block->nb_ops; i++) {
+		op = &list[i];
+
+		if (!opcode_has_load_delay(op->c))
+			continue;
+
+		if (!is_delay_slot(list, i)) {
+			/* Only handle load delays in delay slots.
+			 * PSX games never abused load delay slots otherwise. */
+			continue;
+		}
+
+		if (is_local_branch(block, i - 1)) {
+			imm = (s16)list[i - 1].c.i.imm;
+
+			if (!opcode_reads_register(list[i + imm].c, op->c.i.rt)) {
+				/* The target opcode of the branch is inside
+				 * the block, and it does not read the register
+				 * written to by the load opcode; we can ignore
+				 * the load delay. */
+				continue;
+			}
+		}
+
+		op->flags |= LIGHTREC_LOAD_DELAY;
+	}
+
+	return 0;
+}
+
+static int lightrec_swap_load_delays(struct lightrec_state *state,
+				     struct block *block)
+{
+	unsigned int i;
+	union code c, next;
+	bool in_ds = false, skip_next = false;
+	struct opcode op;
+
+	if (block->nb_ops < 2)
+		return 0;
+
+	for (i = 0; i < block->nb_ops - 2; i++) {
+		c = block->opcode_list[i].c;
+
+		if (skip_next) {
+			skip_next = false;
+		} else if (!in_ds && opcode_is_load(c) && c.i.op != OP_LWC2) {
+			next = block->opcode_list[i + 1].c;
+
+			switch (next.i.op) {
+			case OP_LWL:
+			case OP_LWR:
+			case OP_REGIMM:
+			case OP_BEQ:
+			case OP_BNE:
+			case OP_BLEZ:
+			case OP_BGTZ:
+				continue;
+			}
+
+			if (opcode_reads_register(next, c.i.rt)
+			    && !opcode_writes_register(next, c.i.rs)) {
+				pr_debug("Swapping opcodes at offset 0x%x to "
+					 "respect load delay\n", i << 2);
+
+				op = block->opcode_list[i];
+				block->opcode_list[i] = block->opcode_list[i + 1];
+				block->opcode_list[i + 1] = op;
+				skip_next = true;
+			}
+		}
+
+		in_ds = has_delay_slot(c);
+	}
+
+	return 0;
+}
+
 static int lightrec_local_branches(struct lightrec_state *state, struct block *block)
 {
+	const struct opcode *ds;
 	struct opcode *list;
 	unsigned int i;
 	s32 offset;
@@ -1311,24 +1476,18 @@ static int lightrec_local_branches(struct lightrec_state *state, struct block *b
 	for (i = 0; i < block->nb_ops; i++) {
 		list = &block->opcode_list[i];
 
-		if (should_emulate(list))
+		if (should_emulate(list) || !is_local_branch(block, i))
 			continue;
 
-		switch (list->i.op) {
-		case OP_BEQ:
-		case OP_BNE:
-		case OP_BLEZ:
-		case OP_BGTZ:
-		case OP_REGIMM:
-			offset = i + 1 + (s16)list->i.imm;
-			if (offset >= 0 && offset < block->nb_ops)
-				break;
-			fallthrough;
-		default:
-			continue;
-		}
+		offset = i + 1 + (s16)list->c.i.imm;
 
 		pr_debug("Found local branch to offset 0x%x\n", offset << 2);
+
+		ds = get_delay_slot(block->opcode_list, i);
+		if (op_flag_load_delay(ds->flags) && opcode_is_load(ds->c)) {
+			pr_debug("Branch delay slot has a load delay - skip\n");
+			continue;
+		}
 
 		if (should_emulate(&block->opcode_list[offset])) {
 			pr_debug("Branch target must be emulated - skip\n");
@@ -1388,7 +1547,7 @@ static bool op_writes_rd(union code c)
 {
 	switch (c.i.op) {
 	case OP_SPECIAL:
-	case OP_META_MOV:
+	case OP_META:
 		return true;
 	default:
 		return false;
@@ -1447,7 +1606,7 @@ static int lightrec_early_unload(struct lightrec_state *state, struct block *blo
 	struct opcode *op;
 	s16 last_r[34], last_w[34], last_sync = 0, next_sync = 0;
 	u64 mask_r, mask_w, dirty = 0, loaded = 0;
-	u8 reg;
+	u8 reg, load_delay_reg = 0;
 
 	memset(last_r, 0xff, sizeof(last_r));
 	memset(last_w, 0xff, sizeof(last_w));
@@ -1467,6 +1626,13 @@ static int lightrec_early_unload(struct lightrec_state *state, struct block *blo
 
 	for (i = 0; i < block->nb_ops; i++) {
 		op = &block->opcode_list[i];
+
+		if (OPT_HANDLE_LOAD_DELAYS && load_delay_reg) {
+			/* Handle delayed register write from load opcodes in
+			 * delay slots */
+			last_w[load_delay_reg] = i;
+			load_delay_reg = 0;
+		}
 
 		if (op_flag_sync(op->flags) || should_emulate(op)) {
 			/* The next opcode has the SYNC flag set, or is a branch
@@ -1488,6 +1654,15 @@ static int lightrec_early_unload(struct lightrec_state *state, struct block *blo
 
 		mask_r = opcode_read_mask(op->c);
 		mask_w = opcode_write_mask(op->c);
+
+		if (op_flag_load_delay(op->flags) && opcode_is_load(op->c)) {
+			/* If we have a load opcode in a delay slot, its target
+			 * register is actually not written there but at a
+			 * later point, in the dispatcher. Prevent the algorithm
+			 * from discarding its previous value. */
+			load_delay_reg = op->c.i.rt;
+			mask_w &= ~BIT(op->c.i.rt);
+		}
 
 		for (reg = 0; reg < 34; reg++) {
 			if (mask_r & BIT(reg)) {
@@ -1553,37 +1728,32 @@ static int lightrec_flag_io(struct lightrec_state *state, struct block *block)
 	for (i = 0; i < block->nb_ops; i++) {
 		list = &block->opcode_list[i];
 
-		lightrec_consts_propagate(block->opcode_list, i, v);
+		lightrec_consts_propagate(block, i, v);
 
 		switch (list->i.op) {
 		case OP_SB:
 		case OP_SH:
 		case OP_SW:
-			if (OPT_FLAG_STORES) {
-				/* Mark all store operations that target $sp or $gp
-				 * as not requiring code invalidation. This is based
-				 * on the heuristic that stores using one of these
-				 * registers as address will never hit a code page. */
-				if (list->i.rs >= 28 && list->i.rs <= 29 &&
-				    !state->maps[PSX_MAP_KERNEL_USER_RAM].ops) {
-					pr_debug("Flaging opcode 0x%08x as not "
-						 "requiring invalidation\n",
-						 list->opcode);
-					list->flags |= LIGHTREC_NO_INVALIDATE;
-					list->flags |= LIGHTREC_IO_MODE(LIGHTREC_IO_DIRECT);
-				}
+			/* Mark all store operations that target $sp or $gp
+			 * as not requiring code invalidation. This is based
+			 * on the heuristic that stores using one of these
+			 * registers as address will never hit a code page. */
+			if (list->i.rs >= 28 && list->i.rs <= 29 &&
+			    !state->maps[PSX_MAP_KERNEL_USER_RAM].ops) {
+				pr_debug("Flaging opcode 0x%08x as not requiring invalidation\n",
+					 list->opcode);
+				list->flags |= LIGHTREC_NO_INVALIDATE;
+			}
 
-				/* Detect writes whose destination address is inside the
-				 * current block, using constant propagation. When these
-				 * occur, we mark the blocks as not compilable. */
-				if (is_known(v, list->i.rs) &&
-				    kunseg(v[list->i.rs].value) >= kunseg(block->pc) &&
-				    kunseg(v[list->i.rs].value) < (kunseg(block->pc) +
-								   block->nb_ops * 4)) {
-					pr_debug("Self-modifying block detected\n");
-					block_set_flags(block, BLOCK_NEVER_COMPILE);
-					list->flags |= LIGHTREC_SMC;
-				}
+			/* Detect writes whose destination address is inside the
+			 * current block, using constant propagation. When these
+			 * occur, we mark the blocks as not compilable. */
+			if (is_known(v, list->i.rs) &&
+			    kunseg(v[list->i.rs].value) >= kunseg(block->pc) &&
+			    kunseg(v[list->i.rs].value) < (kunseg(block->pc) + block->nb_ops * 4)) {
+				pr_debug("Self-modifying block detected\n");
+				block_set_flags(block, BLOCK_NEVER_COMPILE);
+				list->flags |= LIGHTREC_SMC;
 			}
 			fallthrough;
 		case OP_SWL:
@@ -1597,8 +1767,7 @@ static int lightrec_flag_io(struct lightrec_state *state, struct block *block)
 		case OP_LWL:
 		case OP_LWR:
 		case OP_LWC2:
-			if (OPT_FLAG_IO &&
-			    (v[list->i.rs].known | v[list->i.rs].sign)) {
+			if (v[list->i.rs].known | v[list->i.rs].sign) {
 				psx_map = lightrec_get_constprop_map(state, v,
 								     list->i.rs,
 								     (s16) list->i.imm);
@@ -1664,6 +1833,19 @@ static int lightrec_flag_io(struct lightrec_state *state, struct block *block)
 					break;
 				}
 			}
+
+			if (!LIGHTREC_FLAGS_GET_IO_MODE(list->flags)
+			    && list->i.rs >= 28 && list->i.rs <= 29
+			    && !state->maps[PSX_MAP_KERNEL_USER_RAM].ops) {
+				/* Assume that all I/O operations that target
+				 * $sp or $gp will always only target a mapped
+				 * memory (RAM, BIOS, scratchpad). */
+				if (state->opt_flags & LIGHTREC_OPT_SP_GP_HIT_RAM)
+					list->flags |= LIGHTREC_IO_MODE(LIGHTREC_IO_RAM);
+				else
+					list->flags |= LIGHTREC_IO_MODE(LIGHTREC_IO_DIRECT);
+			}
+
 			fallthrough;
 		default:
 			break;
@@ -1862,7 +2044,7 @@ static int lightrec_flag_mults_divs(struct lightrec_state *state, struct block *
 	for (i = 0; i < block->nb_ops - 1; i++) {
 		list = &block->opcode_list[i];
 
-		lightrec_consts_propagate(block->opcode_list, i, v);
+		lightrec_consts_propagate(block, i, v);
 
 		switch (list->i.op) {
 		case OP_SPECIAL:
@@ -1917,7 +2099,7 @@ static int lightrec_flag_mults_divs(struct lightrec_state *state, struct block *
 			list->flags &= ~(LIGHTREC_NO_LO | LIGHTREC_NO_HI);
 		}
 
-		if (reg_lo > 0 && reg_lo != REG_LO) {
+		if (0/* Broken */ && reg_lo > 0 && reg_lo != REG_LO) {
 			pr_debug("Found register %s to hold LO (rs = %u, rt = %u)\n",
 				 lightrec_reg_name(reg_lo), list->r.rs, list->r.rt);
 
@@ -1927,7 +2109,7 @@ static int lightrec_flag_mults_divs(struct lightrec_state *state, struct block *
 			list->r.rd = 0;
 		}
 
-		if (reg_hi > 0 && reg_hi != REG_HI) {
+		if (0/* Broken */ && reg_hi > 0 && reg_hi != REG_HI) {
 			pr_debug("Found register %s to hold HI (rs = %u, rt = %u)\n",
 				 lightrec_reg_name(reg_hi), list->r.rs, list->r.rt);
 
@@ -2075,17 +2257,80 @@ static int lightrec_replace_memset(struct lightrec_state *state, struct block *b
 	return 0;
 }
 
+static int lightrec_test_preload_pc(struct lightrec_state *state, struct block *block)
+{
+	unsigned int i;
+	union code c;
+	u32 flags;
+
+	for (i = 0; i < block->nb_ops; i++) {
+		c = block->opcode_list[i].c;
+		flags = block->opcode_list[i].flags;
+
+		if (op_flag_sync(flags))
+			break;
+
+		switch (c.i.op) {
+		case OP_J:
+		case OP_JAL:
+			block->flags |= BLOCK_PRELOAD_PC;
+			return 0;
+
+		case OP_REGIMM:
+			switch (c.r.rt) {
+			case OP_REGIMM_BLTZAL:
+			case OP_REGIMM_BGEZAL:
+				block->flags |= BLOCK_PRELOAD_PC;
+				return 0;
+			default:
+				break;
+			}
+			fallthrough;
+		case OP_BEQ:
+		case OP_BNE:
+		case OP_BLEZ:
+		case OP_BGTZ:
+			if (!op_flag_local_branch(flags)) {
+				block->flags |= BLOCK_PRELOAD_PC;
+				return 0;
+			}
+
+		case OP_SPECIAL:
+			switch (c.r.op) {
+			case OP_SPECIAL_JALR:
+				if (c.r.rd) {
+					block->flags |= BLOCK_PRELOAD_PC;
+					return 0;
+				}
+				break;
+			case OP_SPECIAL_SYSCALL:
+			case OP_SPECIAL_BREAK:
+				block->flags |= BLOCK_PRELOAD_PC;
+				return 0;
+			default:
+				break;
+			}
+			break;
+		}
+	}
+
+	return 0;
+}
+
 static int (*lightrec_optimizers[])(struct lightrec_state *state, struct block *) = {
 	IF_OPT(OPT_REMOVE_DIV_BY_ZERO_SEQ, &lightrec_remove_div_by_zero_check_sequence),
 	IF_OPT(OPT_REPLACE_MEMSET, &lightrec_replace_memset),
 	IF_OPT(OPT_DETECT_IMPOSSIBLE_BRANCHES, &lightrec_detect_impossible_branches),
+	IF_OPT(OPT_HANDLE_LOAD_DELAYS, &lightrec_handle_load_delays),
+	IF_OPT(OPT_HANDLE_LOAD_DELAYS, &lightrec_swap_load_delays),
 	IF_OPT(OPT_TRANSFORM_OPS, &lightrec_transform_branches),
 	IF_OPT(OPT_LOCAL_BRANCHES, &lightrec_local_branches),
 	IF_OPT(OPT_TRANSFORM_OPS, &lightrec_transform_ops),
 	IF_OPT(OPT_SWITCH_DELAY_SLOTS, &lightrec_switch_delay_slots),
-	IF_OPT(OPT_FLAG_IO || OPT_FLAG_STORES, &lightrec_flag_io),
+	IF_OPT(OPT_FLAG_IO, &lightrec_flag_io),
 	IF_OPT(OPT_FLAG_MULT_DIV, &lightrec_flag_mults_divs),
 	IF_OPT(OPT_EARLY_UNLOAD, &lightrec_early_unload),
+	IF_OPT(OPT_PRELOAD_PC, &lightrec_test_preload_pc),
 };
 
 int lightrec_optimize(struct lightrec_state *state, struct block *block)

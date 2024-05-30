@@ -21,6 +21,7 @@
 
 #include "psxcommon.h"
 #include "ppf.h"
+#include "misc.h"
 #include "cdrom.h"
 
 typedef struct tagPPF_DATA {
@@ -58,6 +59,7 @@ static void FillPPFCache() {
 	if (iPPFNum <= 0) return;
 
 	pc = ppfCache = (PPF_CACHE *)malloc(iPPFNum * sizeof(PPF_CACHE));
+	if (pc == NULL) return;
 
 	iPPFNum--;
 	p = ppfHead;
@@ -133,6 +135,7 @@ void CheckPPFCache(unsigned char *pB, unsigned char m, unsigned char s, unsigned
 static void AddToPPF(s32 ladr, s32 pos, s32 anz, unsigned char *ppfmem) {
 	if (ppfHead == NULL) {
 		ppfHead = (PPF_DATA *)malloc(sizeof(PPF_DATA) + anz);
+		if (ppfHead == NULL) return;
 		ppfHead->addr = ladr;
 		ppfHead->pNext = NULL;
 		ppfHead->pos = pos;
@@ -164,6 +167,7 @@ static void AddToPPF(s32 ladr, s32 pos, s32 anz, unsigned char *ppfmem) {
 		}
 
 		padd = (PPF_DATA *)malloc(sizeof(PPF_DATA) + anz);
+		if (padd == NULL) return;
 		padd->addr = ladr;
 		padd->pNext = p;
 		padd->pos = pos;
@@ -353,8 +357,11 @@ fail_io:
 
 // redump.org SBI files, slightly different handling from PCSX-Reloaded
 unsigned char *sbi_sectors;
+int sbi_len;
 
 int LoadSBI(const char *fname, int sector_count) {
+	int good_sectors = 0;
+	int clean_eof = 0;
 	char buffer[16];
 	FILE *sbihandle;
 	u8 sbitime[3], t;
@@ -364,22 +371,35 @@ int LoadSBI(const char *fname, int sector_count) {
 	if (sbihandle == NULL)
 		return -1;
 
-	sbi_sectors = calloc(1, sector_count / 8);
-	if (sbi_sectors == NULL) {
-		fclose(sbihandle);
-		return -1;
-	}
+	sbi_len = (sector_count + 7) / 8;
+	sbi_sectors = calloc(1, sbi_len);
+	if (sbi_sectors == NULL)
+		goto end;
 
 	// 4-byte SBI header
 	if (fread(buffer, 1, 4, sbihandle) != 4)
-		goto fail_io;
+		goto end;
 
 	while (1) {
 		s = fread(sbitime, 1, 3, sbihandle);
 		if (s != 3)
-			goto fail_io;
+		{
+			if (s == 0)
+				clean_eof = 1;
+			break;
+		}
+		s = MSF2SECT(btoi(sbitime[0]), btoi(sbitime[1]), btoi(sbitime[2]));
+		if (s < sector_count) {
+			sbi_sectors[s >> 3] |= 1 << (s&7);
+			good_sectors++;
+		}
+		else
+			SysPrintf(_("SBI sector %d >= %d?\n"), s, sector_count);
+
+		// skip to the next record
 		if (fread(&t, 1, sizeof(t), sbihandle) != sizeof(t))
-			goto fail_io;
+			break;
+		s = -1;
 		switch (t) {
 		default:
 		case 1:
@@ -390,29 +410,28 @@ int LoadSBI(const char *fname, int sector_count) {
 			s = 3;
 			break;
 		}
-		fseek(sbihandle, s, SEEK_CUR);
-
-		s = MSF2SECT(btoi(sbitime[0]), btoi(sbitime[1]), btoi(sbitime[2]));
-		if (s < sector_count)
-			sbi_sectors[s >> 3] |= 1 << (s&7);
-		else
-			SysPrintf(_("SBI sector %d >= %d?\n"), s, sector_count);
+		if (s < 0)
+			break;
+		if (fseek(sbihandle, s, SEEK_CUR))
+			break;
 	}
 
+end:
+	if (!clean_eof)
+		SysPrintf(_("SBI: parse failure at 0x%lx\n"), ftell(sbihandle));
+	if (!good_sectors) {
+		free(sbi_sectors);
+		sbi_sectors = NULL;
+		sbi_len = 0;
+	}
 	fclose(sbihandle);
-	return 0;
-
-fail_io:
-#ifndef NDEBUG
-	SysPrintf(_("File IO error in <%s:%s>.\n"), __FILE__, __func__);
-#endif
-	fclose(sbihandle);
-	return -1;
+	return sbi_sectors ? 0 : -1;
 }
 
 void UnloadSBI(void) {
 	if (sbi_sectors) {
 		free(sbi_sectors);
 		sbi_sectors = NULL;
+		sbi_len = 0;
 	}
 }
