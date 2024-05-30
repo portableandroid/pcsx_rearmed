@@ -3477,6 +3477,12 @@ void retro_run(void)
       if (skip_frame && frameskip_counter < frameskip_interval)
          pl_rearmed_cbs.fskip_force = 1;
    }
+#ifdef PORTANDROID
+    else {
+        // use cb engine's skip advice when it's disabled in core
+        pl_rearmed_cbs.fskip_force = cb_context.video_skip;
+    }
+#endif
 
    /* If frameskip/timing settings have changed,
     * update frontend audio latency
