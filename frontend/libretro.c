@@ -3479,7 +3479,6 @@ void retro_run(void)
    }
 #ifdef PORTANDROID
     else {
-        // use cb engine's skip advice when it's disabled in core
         pl_rearmed_cbs.fskip_force = cb_context.video_skip;
     }
 #endif
