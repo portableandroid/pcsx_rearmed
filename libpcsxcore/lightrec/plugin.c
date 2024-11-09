@@ -53,6 +53,14 @@
 #	define unlikely(x)     (x)
 #endif
 
+#ifndef LIGHTREC_PROG_NAME
+#  ifdef __linux__
+#    define LIGHTREC_PROG_NAME "/proc/self/exe"
+#  else
+#    define LIGHTREC_PROG_NAME "retroarch.exe"
+#  endif
+#endif
+
 psxRegisters psxRegs;
 Rcnt rcnts[4];
 
@@ -60,13 +68,14 @@ void* code_buffer;
 
 static struct lightrec_state *lightrec_state;
 
-static char *name = "retroarch.exe";
-
 static bool use_lightrec_interpreter;
-static bool use_pcsx_interpreter;
 static bool block_stepping;
+//static bool use_pcsx_interpreter;
+#define use_pcsx_interpreter 0
 
 extern u32 lightrec_hacks;
+
+extern void lightrec_code_inv(void *ptr, uint32_t len);
 
 enum my_cp2_opcodes {
 	OP_CP2_RTPS		= 0x01,
@@ -153,7 +162,7 @@ static void lightrec_tansition_to_pcsx(struct lightrec_state *state)
 
 static void lightrec_tansition_from_pcsx(struct lightrec_state *state)
 {
-	s32 cycles_left = next_interupt - psxRegs.cycle;
+	s32 cycles_left = psxRegs.next_interupt - psxRegs.cycle;
 
 	if (block_stepping || cycles_left <= 0 || has_interrupt())
 		lightrec_set_exit_flags(state, LIGHTREC_EXIT_CHECK_INTERRUPT);
@@ -417,29 +426,11 @@ static bool lightrec_can_hw_direct(u32 kaddr, bool is_write, u8 size)
 	}
 }
 
-#if defined(HW_DOL) || defined(HW_RVL)
-static void lightrec_code_inv(void *ptr, uint32_t len)
-{
-	extern void DCFlushRange(void *ptr, u32 len);
-	extern void ICInvalidateRange(void *ptr, u32 len);
-
-	DCFlushRange(ptr, len);
-	ICInvalidateRange(ptr, len);
-}
-#elif defined(HW_WUP)
-static void lightrec_code_inv(void *ptr, uint32_t len)
-{
-	wiiu_clear_cache(ptr, (void *)((uintptr_t)ptr + len));
-}
-#endif
-
 static const struct lightrec_ops lightrec_ops = {
 	.cop2_op = cop2_op,
 	.enable_ram = lightrec_enable_ram,
 	.hw_direct = lightrec_can_hw_direct,
-#if defined(HW_DOL) || defined(HW_RVL) || defined(HW_WUP)
-	.code_inv = lightrec_code_inv,
-#endif
+	.code_inv = LIGHTREC_CODE_INV ? lightrec_code_inv : NULL,
 };
 
 static int lightrec_plugin_init(void)
@@ -474,7 +465,7 @@ static int lightrec_plugin_init(void)
 
 	use_lightrec_interpreter = !!getenv("LIGHTREC_INTERPRETER");
 
-	lightrec_state = lightrec_init(name,
+	lightrec_state = lightrec_init(LIGHTREC_PROG_NAME,
 			lightrec_map, ARRAY_SIZE(lightrec_map),
 			&lightrec_ops);
 
@@ -500,10 +491,10 @@ static void lightrec_plugin_execute_internal(bool block_only)
 
 	regs = lightrec_get_registers(lightrec_state);
 	gen_interupt((psxCP0Regs *)regs->cp0);
-	if (!block_only && stop)
+	if (!block_only && psxRegs.stop)
 		return;
 
-	cycles_pcsx = next_interupt - psxRegs.cycle;
+	cycles_pcsx = psxRegs.next_interupt - psxRegs.cycle;
 	assert((s32)cycles_pcsx > 0);
 
 	// step during early boot so that 0x80030000 fastboot hack works
@@ -512,7 +503,7 @@ static void lightrec_plugin_execute_internal(bool block_only)
 		cycles_pcsx = 0;
 
 	if (use_pcsx_interpreter) {
-		intExecuteBlock(0);
+		psxInt.ExecuteBlock(&psxRegs, 0);
 	} else {
 		u32 cycles_lightrec = cycles_pcsx * 1024;
 		if (unlikely(use_lightrec_interpreter)) {
@@ -558,13 +549,14 @@ static void lightrec_plugin_execute_internal(bool block_only)
 	}
 }
 
-static void lightrec_plugin_execute(void)
+static void lightrec_plugin_execute(psxRegisters *regs)
 {
-	while (!stop)
+	while (!regs->stop)
 		lightrec_plugin_execute_internal(false);
 }
 
-static void lightrec_plugin_execute_block(enum blockExecCaller caller)
+static void lightrec_plugin_execute_block(psxRegisters *regs,
+	enum blockExecCaller caller)
 {
 	lightrec_plugin_execute_internal(true);
 }
@@ -613,6 +605,8 @@ static void lightrec_plugin_apply_config()
 	}
 	cycles_per_op_old = cycles_per_op;
 	lightrec_set_cycles_per_opcode(lightrec_state, cycles_per_op);
+
+	intApplyConfig();
 }
 
 static void lightrec_plugin_shutdown(void)

@@ -94,11 +94,7 @@ struct rearmed_cbs {
 		int   dwFrameRateTicks;
 	} gpu_peops;
 	struct {
-		int   abe_hack;
-		int   no_light, no_blend;
-		int   lineskip;
-	} gpu_unai_old;
-	struct {
+		int old_renderer;
 		int ilace_force;
 		int pixel_skip;
 		int lighting;
@@ -119,6 +115,7 @@ struct rearmed_cbs {
 	int screen_centering_type_default;
 	int screen_centering_x;
 	int screen_centering_y;
+	int show_overscan;
 };
 
 extern struct rearmed_cbs pl_rearmed_cbs;

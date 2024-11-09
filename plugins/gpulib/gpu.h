@@ -39,7 +39,8 @@ extern "C" {
 #define LE16TOH(x) (x)
 #endif
 
-#define BIT(x) (1 << (x))
+#undef BIT
+#define BIT(x) (1u << (x))
 
 #define PSX_GPU_STATUS_DHEIGHT		BIT(19)
 #define PSX_GPU_STATUS_PAL		BIT(20)
@@ -81,6 +82,7 @@ struct psx_gpu {
     uint32_t downscale_enable:1;
     uint32_t downscale_active:1;
     uint32_t dims_changed:1;
+    uint32_t show_overscan:2;
     uint32_t *frame_count;
     uint32_t *hcnt; /* hsync count */
     struct {

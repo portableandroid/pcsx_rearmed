@@ -112,12 +112,13 @@ extern int Log;
 
 void __Log(char *fmt, ...);
 
+// lots of timing depends on this and makes or breaks compatibility,
+// don't change unless you're going to retest hundreds of games
 #define CYCLE_MULT_DEFAULT 175
 
 typedef struct {
 	char Gpu[MAXPATHLEN];
 	char Spu[MAXPATHLEN];
-	char Cdr[MAXPATHLEN];
 	char Pad1[MAXPATHLEN];
 	char Pad2[MAXPATHLEN];
 	char Net[MAXPATHLEN];
@@ -132,7 +133,6 @@ typedef struct {
 	boolean Mdec;
 	boolean PsxAuto;
 	boolean Cdda;
-	boolean AsyncCD;
 	boolean CHD_Precache; /* loads disk image into memory, works with CHD only. */
 	boolean HLE;
 	boolean SlowBoot;

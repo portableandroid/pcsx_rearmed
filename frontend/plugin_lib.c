@@ -610,6 +610,17 @@ static void update_analogs(void)
 	}
 }
 
+static void emu_set_action(enum sched_action action_)
+{
+	extern enum sched_action emu_action, emu_action_old;
+
+	if (action_ == SACTION_NONE)
+		emu_action_old = 0;
+	else if (action_ != emu_action_old)
+		psxRegs.stop++;
+	emu_action = action_;
+}
+
 static void update_input(void)
 {
 	int actions[IN_BINDTYPE_COUNT] = { 0, };
@@ -764,14 +775,14 @@ void pl_frame_limit(void)
 
 		// recompilation is not that fast and may cause frame skip on
 		// loading screens and such, resulting in flicker or glitches
-		if (new_dynarec_did_compile) {
+		if (ndrc_g.did_compile) {
 			if (drc_active_vsyncs < 32)
 				pl_rearmed_cbs.fskip_advice = 0;
 			drc_active_vsyncs++;
 		}
 		else
 			drc_active_vsyncs = 0;
-		new_dynarec_did_compile = 0;
+		ndrc_g.did_compile = 0;
 	}
 
 	pcnt_start(PCNT_ALL);
@@ -834,7 +845,7 @@ static void *watchdog_thread(void *unused)
 	{
 		sleep(sleep_time);
 
-		if (stop) {
+		if (psxRegs.stop) {
 			seen_dead = 0;
 			sleep_time = 5;
 			continue;
@@ -873,10 +884,11 @@ void pl_start_watchdog(void)
 		fprintf(stderr, "could not start watchdog: %d\n", ret);
 }
 
-static void *pl_emu_mmap(unsigned long addr, size_t size, int is_fixed,
-	enum psxMapTag tag)
+static void *pl_emu_mmap(unsigned long addr, size_t size,
+	enum psxMapTag tag, int *can_retry_addr)
 {
-	return plat_mmap(addr, size, 0, is_fixed);
+	*can_retry_addr = 1;
+	return plat_mmap(addr, size, 0, 0);
 }
 
 static void pl_emu_munmap(void *ptr, size_t size, enum psxMapTag tag)
@@ -886,7 +898,8 @@ static void pl_emu_munmap(void *ptr, size_t size, enum psxMapTag tag)
 
 static void *pl_mmap(unsigned int size)
 {
-	return psxMapHook(0, size, 0, MAP_TAG_VRAM);
+	int can_retry_addr;
+	return psxMapHook(0, size, MAP_TAG_VRAM, &can_retry_addr);
 }
 
 static void pl_munmap(void *ptr, unsigned int size)

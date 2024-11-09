@@ -23,7 +23,8 @@
 #include <inttypes.h>
 #include <stdint.h>
 
-#define PC_FMT "PC 0x%08"PRIx32
+#define X32_FMT "0x%08"PRIx32
+#define PC_FMT "PC "X32_FMT
 
 #define ARRAY_SIZE(x) (sizeof(x) ? sizeof(x) / sizeof((x)[0]) : 0)
 
@@ -176,9 +177,9 @@ struct lightrec_state {
 	u32 exit_flags;
 	u32 old_cycle_counter;
 	u32 cycles_per_op;
+	void *c_wrapper;
 	struct block *dispatcher, *c_wrapper_block;
 	void *c_wrappers[C_WRAPPERS_COUNT];
-	void *wrappers_eps[C_WRAPPERS_COUNT];
 	struct blockcache *block_cache;
 	struct recompiler *rec;
 	struct lightrec_cstate *cstate;
@@ -200,6 +201,9 @@ struct lightrec_state {
 	_Bool mirrors_mapped;
 	void *code_lut[];
 };
+
+#define lightrec_offset(ptr) \
+	offsetof(struct lightrec_state, ptr)
 
 u32 lightrec_rw(struct lightrec_state *state, union code op, u32 addr,
 		u32 data, u32 *flags, struct block *block, u16 offset);
@@ -366,6 +370,16 @@ static inline _Bool can_sign_extend(s32 value, u8 order)
 static inline _Bool can_zero_extend(u32 value, u8 order)
 {
       return (value >> order) == 0;
+}
+
+static inline _Bool is_low_mask(u32 imm)
+{
+	return imm & 1 ? popcount32(imm + 1) <= 1 : 0;
+}
+
+static inline _Bool is_high_mask(u32 imm)
+{
+	return imm ? popcount32(imm + BIT(ctz32(imm))) == 0 : 0;
 }
 
 static inline const struct opcode *

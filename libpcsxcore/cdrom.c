@@ -23,6 +23,7 @@
 
 #include <assert.h>
 #include "cdrom.h"
+#include "cdrom-async.h"
 #include "misc.h"
 #include "ppf.h"
 #include "psxdma.h"
@@ -124,6 +125,18 @@ static struct {
 	u8 AttenuatorRightToRightT, AttenuatorRightToLeftT;
 } cdr;
 static s16 read_buf[CD_FRAMESIZE_RAW/2];
+
+struct SubQ {
+	char res0[12];
+	unsigned char ControlAndADR;
+	unsigned char TrackNumber;
+	unsigned char IndexNumber;
+	unsigned char TrackRelativeAddress[3];
+	unsigned char Filler;
+	unsigned char AbsoluteAddress[3];
+	unsigned char CRC[2];
+	char res1[72];
+};
 
 /* CD-ROM magic numbers */
 #define CdlSync        0  /* nocash documentation : "Uh, actually, returns error code 40h = Invalid Command...?" */
@@ -232,23 +245,10 @@ enum drive_state {
 	DRIVESTATE_SEEK,
 };
 
-static struct CdrStat stat;
+static struct CdrStat cdr_stat;
 
 static unsigned int msf2sec(const u8 *msf) {
 	return ((msf[0] * 60 + msf[1]) * 75) + msf[2];
-}
-
-// for that weird psemu API..
-static unsigned int fsm2sec(const u8 *msf) {
-	return ((msf[2] * 60 + msf[1]) * 75) + msf[0];
-}
-
-static void sec2msf(unsigned int s, u8 *msf) {
-	msf[0] = s / 75 / 60;
-	s = s - msf[0] * 75 * 60;
-	msf[1] = s / 75;
-	s = s - msf[1] * 75;
-	msf[2] = s;
 }
 
 // cdrPlayReadInterrupt
@@ -269,7 +269,6 @@ static void sec2msf(unsigned int s, u8 *msf) {
 }
 
 #define StopCdda() { \
-	if (cdr.Play && !Config.Cdda) CDR_stop(); \
 	cdr.Play = FALSE; \
 	cdr.FastForward = 0; \
 	cdr.FastBackward = 0; \
@@ -327,10 +326,10 @@ void cdrLidSeekInterrupt(void)
 		//StopReading();
 		SetPlaySeekRead(cdr.StatP, 0);
 
-		if (CDR_getStatus(&stat) == -1)
+		if (cdra_getStatus(&cdr_stat) == -1)
 			return;
 
-		if (stat.Status & STATUS_SHELLOPEN)
+		if (cdr_stat.Status & STATUS_SHELLOPEN)
 		{
 			memset(cdr.Prev, 0xff, sizeof(cdr.Prev));
 			cdr.DriveState = DRIVESTATE_LID_OPEN;
@@ -339,8 +338,8 @@ void cdrLidSeekInterrupt(void)
 		break;
 
 	case DRIVESTATE_LID_OPEN:
-		if (CDR_getStatus(&stat) == -1)
-			stat.Status &= ~STATUS_SHELLOPEN;
+		if (cdra_getStatus(&cdr_stat) != 0)
+			cdr_stat.Status &= ~STATUS_SHELLOPEN;
 
 		// 02, 12, 10
 		if (!(cdr.StatP & STATUS_SHELLOPEN)) {
@@ -367,7 +366,7 @@ void cdrLidSeekInterrupt(void)
 		else if (cdr.StatP & STATUS_ROTATING) {
 			cdr.StatP &= ~STATUS_ROTATING;
 		}
-		else if (!(stat.Status & STATUS_SHELLOPEN)) {
+		else if (!(cdr_stat.Status & STATUS_SHELLOPEN)) {
 			// closed now
 			CheckCdrom();
 
@@ -412,8 +411,8 @@ static void Find_CurTrack(const u8 *time)
 	current = msf2sec(time);
 
 	for (cdr.CurTrack = 1; cdr.CurTrack < cdr.ResultTN[1]; cdr.CurTrack++) {
-		CDR_getTD(cdr.CurTrack + 1, cdr.ResultTD);
-		sect = fsm2sec(cdr.ResultTD);
+		cdra_getTD(cdr.CurTrack + 1, cdr.ResultTD);
+		sect = msf2sec(cdr.ResultTD);
 		if (sect - current >= 150)
 			break;
 	}
@@ -425,22 +424,20 @@ static void generate_subq(const u8 *time)
 	unsigned int this_s, start_s, next_s, pregap;
 	int relative_s;
 
-	CDR_getTD(cdr.CurTrack, start);
+	cdra_getTD(cdr.CurTrack, start);
 	if (cdr.CurTrack + 1 <= cdr.ResultTN[1]) {
 		pregap = 150;
-		CDR_getTD(cdr.CurTrack + 1, next);
+		cdra_getTD(cdr.CurTrack + 1, next);
 	}
 	else {
 		// last track - cd size
 		pregap = 0;
-		next[0] = cdr.SetSectorEnd[2];
-		next[1] = cdr.SetSectorEnd[1];
-		next[2] = cdr.SetSectorEnd[0];
+		memcpy(next, cdr.SetSectorEnd, 3);
 	}
 
 	this_s = msf2sec(time);
-	start_s = fsm2sec(start);
-	next_s = fsm2sec(next);
+	start_s = msf2sec(start);
+	next_s = msf2sec(next);
 
 	cdr.TrackChanged = FALSE;
 
@@ -457,7 +454,8 @@ static void generate_subq(const u8 *time)
 		cdr.subq.Index = 0;
 		relative_s = -relative_s;
 	}
-	sec2msf(relative_s, cdr.subq.Relative);
+	lba2msf(relative_s, &cdr.subq.Relative[0],
+		&cdr.subq.Relative[1], &cdr.subq.Relative[2]);
 
 	cdr.subq.Track = itob(cdr.CurTrack);
 	cdr.subq.Relative[0] = itob(cdr.subq.Relative[0]);
@@ -470,41 +468,37 @@ static void generate_subq(const u8 *time)
 
 static int ReadTrack(const u8 *time)
 {
-	unsigned char tmp[3];
-	int read_ok;
+	int ret;
 
-	tmp[0] = itob(time[0]);
-	tmp[1] = itob(time[1]);
-	tmp[2] = itob(time[2]);
+	CDR_LOG("ReadTrack *** %02d:%02d:%02d\n", tmp[0], tmp[1], tmp[2]);
 
-	CDR_LOG("ReadTrack *** %02x:%02x:%02x\n", tmp[0], tmp[1], tmp[2]);
-
-	if (memcmp(cdr.Prev, tmp, 3) == 0)
+	if (memcmp(cdr.Prev, time, 3) == 0)
 		return 1;
 
-	read_ok = CDR_readTrack(tmp);
-	if (read_ok)
-		memcpy(cdr.Prev, tmp, 3);
-	return read_ok;
+	ret = cdra_readTrack(time);
+	if (ret == 0)
+		memcpy(cdr.Prev, time, 3);
+	return ret == 0;
 }
 
 static void UpdateSubq(const u8 *time)
 {
-	const struct SubQ *subq;
-	int s = MSF2SECT(time[0], time[1], time[2]);
+	int ret = -1, s = MSF2SECT(time[0], time[1], time[2]);
+	struct SubQ subq;
 	u16 crc;
 
 	if (CheckSBI(s))
 		return;
 
-	subq = (struct SubQ *)CDR_getBufferSub(s);
-	if (subq != NULL && cdr.CurTrack == 1) {
-		crc = calcCrc((u8 *)subq + 12, 10);
-		if (crc == (((u16)subq->CRC[0] << 8) | subq->CRC[1])) {
-			cdr.subq.Track = subq->TrackNumber;
-			cdr.subq.Index = subq->IndexNumber;
-			memcpy(cdr.subq.Relative, subq->TrackRelativeAddress, 3);
-			memcpy(cdr.subq.Absolute, subq->AbsoluteAddress, 3);
+	if (cdr.CurTrack == 1)
+		ret = cdra_readSub(time, &subq);
+	if (ret == 0) {
+		crc = calcCrc((u8 *)&subq + 12, 10);
+		if (crc == (((u16)subq.CRC[0] << 8) | subq.CRC[1])) {
+			cdr.subq.Track = subq.TrackNumber;
+			cdr.subq.Index = subq.IndexNumber;
+			memcpy(cdr.subq.Relative, subq.TrackRelativeAddress, 3);
+			memcpy(cdr.subq.Absolute, subq.AbsoluteAddress, 3);
 		}
 		else {
 			CDR_LOG_I("subq bad crc @%02d:%02d:%02d\n",
@@ -669,13 +663,13 @@ static int msfiEq(const u8 *a, const u8 *b)
 
 void cdrPlayReadInterrupt(void)
 {
-	int hit = CDR_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1], cdr.SetSectorPlay[2]);
-	if (!hit && cdr.PhysCdPropagations++ < 222) {
-		// this propagates real cdrom delays to the emulated game
+	int hit = cdra_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1], cdr.SetSectorPlay[2]);
+	if (!hit && cdr.PhysCdPropagations < 75/2) {
+		// this propagates the real cdrom delays to the emulated game
 		CDRPLAYREAD_INT(cdReadTime / 2, 0);
+		cdr.PhysCdPropagations++;
 		return;
 	}
-	cdr.PhysCdPropagations = 0;
 
 	cdr.LastReadSeekCycles = psxRegs.cycle;
 
@@ -699,7 +693,7 @@ void cdrPlayReadInterrupt(void)
 		cdr.DriveState = DRIVESTATE_PAUSED;
 	}
 	else {
-		CDR_readCDDA(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1], cdr.SetSectorPlay[2], (u8 *)read_buf);
+		cdra_readCDDA(cdr.SetSectorPlay, read_buf);
 	}
 
 	if (!cdr.IrqStat && (cdr.Mode & (MODE_AUTOPAUSE|MODE_REPORT)))
@@ -711,18 +705,21 @@ void cdrPlayReadInterrupt(void)
 	}
 
 	msfiAdd(cdr.SetSectorPlay, 1);
-	CDR_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1], cdr.SetSectorPlay[2]);
+	cdra_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1], cdr.SetSectorPlay[2]);
 
 	// update for CdlGetlocP/autopause
 	generate_subq(cdr.SetSectorPlay);
 
 	CDRPLAYREAD_INT(cdReadTime, 0);
+
+	// stop propagation since it breaks streaming
+	cdr.PhysCdPropagations = 0xff;
 }
 
 static void softReset(void)
 {
-	CDR_getStatus(&stat);
-	if (stat.Status & STATUS_SHELLOPEN) {
+	cdra_getStatus(&cdr_stat);
+	if (cdr_stat.Status & STATUS_SHELLOPEN) {
 		cdr.DriveState = DRIVESTATE_LID_OPEN;
 		cdr.StatP = STATUS_SHELLOPEN;
 	}
@@ -753,7 +750,6 @@ void cdrInterrupt(void) {
 	u32 second_resp_time = 0;
 	const void *buf;
 	u8 ParamC;
-	u8 set_loc[3];
 	int read_ok;
 	u16 not_ready = 0;
 	u8 IrqStat = Acknowledge;
@@ -768,7 +764,7 @@ void cdrInterrupt(void) {
 	}
 	if (cdr.Irq1Pending) {
 		// hand out the "newest" sector, according to nocash
-		cdrUpdateTransferBuf(CDR_getBuffer());
+		cdrUpdateTransferBuf(cdra_getBuffer());
 		CDR_LOG_I("%x:%02x:%02x loaded on ack, cmd=%02x res=%02x\n",
 			cdr.Transfer[0], cdr.Transfer[1], cdr.Transfer[2],
 			cdr.CmdInProgress, cdr.Irq1Pending);
@@ -833,11 +829,14 @@ void cdrInterrupt(void) {
 			}
 			else
 			{
+				u8 set_loc[3];
 				for (i = 0; i < 3; i++)
 					set_loc[i] = btoi(cdr.Param[i]);
-				cdr.RetryDetected = msfiEq(cdr.SetSector, set_loc)
-					&& !cdr.SetlocPending;
-				//cdr.RetryDetected |= msfiEq(cdr.Param, cdr.Transfer);
+				if ((msfiEq(cdr.SetSector, set_loc)) //|| msfiEq(cdr.Param, cdr.Transfer))
+						&& !cdr.SetlocPending)
+					cdr.RetryDetected++;
+				else
+					cdr.RetryDetected = 0;
 				memcpy(cdr.SetSector, set_loc, 3);
 				cdr.SetSector[3] = 0;
 				cdr.SetlocPending = 1;
@@ -864,11 +863,9 @@ void cdrInterrupt(void) {
 
 				CDR_LOG("PLAY track %d\n", cdr.CurTrack);
 
-				if (CDR_getTD((u8)cdr.CurTrack, cdr.ResultTD) != -1) {
-					for (i = 0; i < 3; i++)
-						set_loc[i] = cdr.ResultTD[2 - i];
-					seekTime = cdrSeekTime(set_loc);
-					memcpy(cdr.SetSectorPlay, set_loc, 3);
+				if (cdra_getTD(cdr.CurTrack, cdr.ResultTD) != -1) {
+					seekTime = cdrSeekTime(cdr.ResultTD);
+					memcpy(cdr.SetSectorPlay, cdr.ResultTD, 3);
 				}
 			}
 			else if (cdr.SetlocPending) {
@@ -901,14 +898,12 @@ void cdrInterrupt(void) {
 			cdr.ReportDelay = 60;
 			cdr.sectorsRead = 0;
 
-			if (!Config.Cdda)
-				CDR_play(cdr.SetSectorPlay);
-
 			SetPlaySeekRead(cdr.StatP, STATUS_SEEK | STATUS_ROTATING);
 			
 			// BIOS player - set flag again
 			cdr.Play = TRUE;
 			cdr.DriveState = DRIVESTATE_PLAY_READ;
+			cdr.PhysCdPropagations = 0;
 
 			CDRPLAYREAD_INT(cdReadTime + seekTime, 1);
 			start_rotating = 1;
@@ -948,11 +943,8 @@ void cdrInterrupt(void) {
 		case CdlStop:
 			if (cdr.Play) {
 				// grab time for current track
-				CDR_getTD((u8)(cdr.CurTrack), cdr.ResultTD);
-
-				cdr.SetSectorPlay[0] = cdr.ResultTD[2];
-				cdr.SetSectorPlay[1] = cdr.ResultTD[1];
-				cdr.SetSectorPlay[2] = cdr.ResultTD[0];
+				cdra_getTD(cdr.CurTrack, cdr.ResultTD);
+				memcpy(cdr.SetSectorPlay, cdr.ResultTD, 3);
 			}
 
 			StopCdda();
@@ -991,6 +983,7 @@ void cdrInterrupt(void) {
 			Hokuto no Ken 2
 			InuYasha - Feudal Fairy Tale
 			Dance Dance Revolution Konamix
+			Digimon Rumble Arena
 			...
 			*/
 			if (!(cdr.StatP & (STATUS_PLAY | STATUS_READ)))
@@ -999,7 +992,9 @@ void cdrInterrupt(void) {
 			}
 			else
 			{
-				second_resp_time = 2 * 1097107;
+				second_resp_time = 2100011;
+				// a hack to try to avoid weird cmd vs irq1 races causing games to retry
+				second_resp_time += (cdr.RetryDetected & 15) * 100001;
 			}
 			SetPlaySeekRead(cdr.StatP, 0);
 			DriveStateOld = cdr.DriveState;
@@ -1092,7 +1087,7 @@ void cdrInterrupt(void) {
 			break;
 
 		case CdlGetTN:
-			if (CDR_getTN(cdr.ResultTN) == -1) {
+			if (cdra_getTN(cdr.ResultTN) != 0) {
 				assert(0);
 			}
 			SetResultSize_(3);
@@ -1102,15 +1097,15 @@ void cdrInterrupt(void) {
 
 		case CdlGetTD:
 			cdr.Track = btoi(cdr.Param[0]);
-			if (CDR_getTD(cdr.Track, cdr.ResultTD) == -1) {
+			if (cdra_getTD(cdr.Track, cdr.ResultTD) != 0) {
 				error = ERROR_BAD_ARGVAL;
 				goto set_error;
 			}
 			SetResultSize_(3);
-			cdr.Result[1] = itob(cdr.ResultTD[2]);
+			cdr.Result[1] = itob(cdr.ResultTD[0]);
 			cdr.Result[2] = itob(cdr.ResultTD[1]);
 			// no sector number
-			//cdr.Result[3] = itob(cdr.ResultTD[0]);
+			//cdr.Result[3] = itob(cdr.ResultTD[2]);
 			break;
 
 		case CdlSeekL:
@@ -1123,7 +1118,7 @@ void cdrInterrupt(void) {
 				seekTime = cdrSeekTime(cdr.SetSector);
 			memcpy(cdr.SetSectorPlay, cdr.SetSector, 4);
 			cdr.DriveState = DRIVESTATE_SEEK;
-			CDR_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1],
+			cdra_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1],
 					cdr.SetSectorPlay[2]);
 			/*
 			Crusaders of Might and Magic = 0.5x-4x
@@ -1150,7 +1145,7 @@ void cdrInterrupt(void) {
 
 			Find_CurTrack(cdr.SetSectorPlay);
 			read_ok = ReadTrack(cdr.SetSectorPlay);
-			if (read_ok && (buf = CDR_getBuffer()))
+			if (read_ok && (buf = cdra_getBuffer()))
 				memcpy(cdr.LocL, buf, 8);
 			UpdateSubq(cdr.SetSectorPlay);
 			cdr.DriveState = DRIVESTATE_STANDBY;
@@ -1188,11 +1183,11 @@ void cdrInterrupt(void) {
 			cdr.Result[3] = 0;
 
 			// 0x10 - audio | 0x40 - disk missing | 0x80 - unlicensed
-			if (CDR_getStatus(&stat) == -1 || stat.Type == 0 || stat.Type == 0xff) {
+			if (cdra_getStatus(&cdr_stat) != 0 || cdr_stat.Type == 0 || cdr_stat.Type == 0xff) {
 				cdr.Result[1] = 0xc0;
 			}
 			else {
-				if (stat.Type == 2)
+				if (cdr_stat.Type == 2)
 					cdr.Result[1] |= 0x10;
 				if (CdromId[0] == '\0')
 					cdr.Result[1] |= 0x80;
@@ -1262,7 +1257,8 @@ void cdrInterrupt(void) {
 			cdr.SubqForwardSectors = 1;
 			cdr.sectorsRead = 0;
 			cdr.DriveState = DRIVESTATE_SEEK;
-			CDR_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1],
+			cdr.PhysCdPropagations = 0;
+			cdra_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1],
 					cdr.SetSectorPlay[2]);
 
 			cycles = (cdr.Mode & MODE_SPEED) ? cdReadTime : cdReadTime * 2;
@@ -1380,7 +1376,7 @@ static void cdrReadInterrupt(void)
 
 	read_ok = ReadTrack(cdr.SetSectorPlay);
 	if (read_ok)
-		buf = CDR_getBuffer();
+		buf = cdra_getBuffer();
 	if (buf == NULL)
 		read_ok = 0;
 
@@ -1443,7 +1439,7 @@ static void cdrReadInterrupt(void)
 		cdrReadInterruptSetResult(cdr.StatP);
 
 	msfiAdd(cdr.SetSectorPlay, 1);
-	CDR_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1], cdr.SetSectorPlay[2]);
+	cdra_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1], cdr.SetSectorPlay[2]);
 
 	CDRPLAYREAD_INT((cdr.Mode & MODE_SPEED) ? (cdReadTime / 2) : cdReadTime, 0);
 }
@@ -1745,13 +1741,8 @@ void cdrDmaInterrupt(void)
 
 static void getCdInfo(void)
 {
-	u8 tmp;
-
-	CDR_getTN(cdr.ResultTN);
-	CDR_getTD(0, cdr.SetSectorEnd);
-	tmp = cdr.SetSectorEnd[0];
-	cdr.SetSectorEnd[0] = cdr.SetSectorEnd[2];
-	cdr.SetSectorEnd[2] = tmp;
+	cdra_getTN(cdr.ResultTN);
+	cdra_getTD(0, cdr.SetSectorEnd);
 }
 
 void cdrReset() {
@@ -1776,10 +1767,7 @@ int cdrFreeze(void *f, int Mode) {
 	u32 tmp;
 	u8 tmpp[3];
 
-	if (Mode == 0 && !Config.Cdda)
-		CDR_stop();
-	
-	cdr.freeze_ver = 0x63647202;
+	cdr.freeze_ver = 0x63647203;
 	gzfreeze(&cdr, sizeof(cdr));
 	
 	if (Mode == 1) {
@@ -1799,19 +1787,21 @@ int cdrFreeze(void *f, int Mode) {
 			cdr.SubqForwardSectors = SUBQ_FORWARD_SECTORS;
 
 		// read right sub data
-		tmpp[0] = btoi(cdr.Prev[0]);
-		tmpp[1] = btoi(cdr.Prev[1]);
-		tmpp[2] = btoi(cdr.Prev[2]);
-		cdr.Prev[0]++;
-		ReadTrack(tmpp);
+		memcpy(tmpp, cdr.Prev, sizeof(tmpp));
+		if (cdr.freeze_ver < 0x63647203) {
+			tmpp[0] = btoi(tmpp[0]);
+			tmpp[1] = btoi(tmpp[1]);
+			tmpp[2] = btoi(tmpp[2]);
+		}
+		cdr.Prev[0] = 0xff;
+		if (tmpp[0] != 0xff)
+			ReadTrack(tmpp);
 
 		if (cdr.Play) {
 			if (cdr.freeze_ver < 0x63647202)
 				memcpy(cdr.SetSectorPlay, cdr.SetSector, 3);
 
 			Find_CurTrack(cdr.SetSectorPlay);
-			if (!Config.Cdda)
-				CDR_play(cdr.SetSectorPlay);
 		}
 		if (!cdr.Muted)
 			ll = cdr.AttenuatorLeftToLeft, lr = cdr.AttenuatorLeftToLeft,

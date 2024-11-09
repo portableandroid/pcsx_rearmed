@@ -3,17 +3,29 @@
 # default stuff goes here, so that config can override
 TARGET ?= pcsx
 CFLAGS += -Wall -Iinclude -ffast-math
-ifeq ($(DEBUG), 1)
-CFLAGS += -O0 -ggdb
-else
-ifeq ($(platform), $(filter $(platform), vita ctr))
-CFLAGS += -O3 -DNDEBUG
-else
-CFLAGS += -O2 -DNDEBUG
+
+DEBUG ?= 0
+DEBUG_SYMS ?= 0
+ASSERTS ?= 0
+HAVE_CHD ?= 1
+ifneq ($(DEBUG)$(DEBUG_SYMS), 00)
+CFLAGS += -ggdb
+endif
+ifneq ($(DEBUG), 1)
+CFLAGS += -O2
+ifneq ($(ASSERTS), 1)
+CFLAGS += -DNDEBUG
 endif
 endif
 ifeq ($(DEBUG_ASAN), 1)
 CFLAGS += -fsanitize=address
+LDFLAGS += -fsanitize=address
+#LDFLAGS += -static-libasan
+endif
+ifneq ($(NO_FSECTIONS), 1)
+CFLAGS += -ffunction-sections -fdata-sections
+FSECTIONS_LDFLAGS ?= -Wl,--gc-sections
+LDFLAGS += $(FSECTIONS_LDFLAGS)
 endif
 CFLAGS += -DP_HAVE_MMAP=$(if $(NO_MMAP),0,1) \
 	  -DP_HAVE_PTHREAD=$(if $(NO_PTHREAD),0,1) \
@@ -48,9 +60,6 @@ endif
 CC_LINK ?= $(CC)
 CC_AS ?= $(CC)
 LDFLAGS += $(MAIN_LDFLAGS)
-ifeq ($(DEBUG_ASAN), 1)
-LDFLAGS += -static-libasan
-endif
 EXTRA_LDFLAGS ?= -Wl,-Map=$@.map
 LDLIBS += $(MAIN_LDLIBS)
 ifdef PCNT
@@ -58,7 +67,8 @@ CFLAGS += -DPCNT
 endif
 
 # core
-OBJS += libpcsxcore/cdriso.o libpcsxcore/cdrom.o libpcsxcore/cheat.o libpcsxcore/database.o \
+OBJS += libpcsxcore/cdriso.o libpcsxcore/cdrom.o libpcsxcore/cdrom-async.o \
+	libpcsxcore/cheat.o libpcsxcore/database.o \
 	libpcsxcore/decode_xa.o libpcsxcore/mdec.o \
 	libpcsxcore/misc.o libpcsxcore/plugins.o libpcsxcore/ppf.o libpcsxcore/psxbios.o \
 	libpcsxcore/psxcommon.o libpcsxcore/psxcounters.o libpcsxcore/psxdma.o \
@@ -66,10 +76,7 @@ OBJS += libpcsxcore/cdriso.o libpcsxcore/cdrom.o libpcsxcore/cheat.o libpcsxcore
 	libpcsxcore/psxevents.o libpcsxcore/r3000a.o \
 	libpcsxcore/sio.o libpcsxcore/spu.o libpcsxcore/gpu.o
 OBJS += libpcsxcore/gte.o libpcsxcore/gte_nf.o libpcsxcore/gte_divider.o
-
-ifeq ($(DEBUG), 1)
-#OBJS += libpcsxcore/debug.o	libpcsxcore/socket.o libpcsxcore/disr3000a.o
-endif
+#OBJS += libpcsxcore/debug.o libpcsxcore/socket.o libpcsxcore/disr3000a.o
 
 ifeq ($(WANT_ZLIB),1)
 ZLIB_DIR = deps/libchdr/deps/zlib-1.3.1
@@ -91,6 +98,7 @@ OBJS += $(ZLIB_DIR)/adler32.o \
         $(ZLIB_DIR)/zutil.o
 $(ZLIB_DIR)/%.o: CFLAGS += -DHAVE_UNISTD_H
 endif
+
 ifeq "$(ARCH)" "arm"
 OBJS += libpcsxcore/gte_arm.o
 endif
@@ -99,6 +107,13 @@ OBJS += libpcsxcore/gte_neon.o
 endif
 libpcsxcore/psxbios.o: CFLAGS += -Wno-nonnull
 
+ifeq "$(USE_ASYNC_CDROM)" "1"
+libpcsxcore/cdrom-async.o: CFLAGS += -DUSE_ASYNC_CDROM
+frontend/libretro.o: CFLAGS += -DUSE_ASYNC_CDROM
+frontend/menu.o: CFLAGS += -DUSE_ASYNC_CDROM
+USE_RTHREADS := 1
+endif
+
 # dynarec
 ifeq "$(DYNAREC)" "lightrec"
 CFLAGS += -Ideps/lightning/include -Ideps/lightrec -Iinclude/lightning -Iinclude/lightrec \
@@ -106,7 +121,9 @@ CFLAGS += -Ideps/lightning/include -Ideps/lightrec -Iinclude/lightning -Iinclude
 LIGHTREC_CUSTOM_MAP ?= 0
 LIGHTREC_CUSTOM_MAP_OBJ ?= libpcsxcore/lightrec/mem.o
 LIGHTREC_THREADED_COMPILER ?= 0
+LIGHTREC_CODE_INV ?= 0
 CFLAGS += -DLIGHTREC_CUSTOM_MAP=$(LIGHTREC_CUSTOM_MAP) \
+	  -DLIGHTREC_CODE_INV=$(LIGHTREC_CODE_INV) \
 	  -DLIGHTREC_ENABLE_THREADED_COMPILER=$(LIGHTREC_THREADED_COMPILER)
 ifeq ($(LIGHTREC_CUSTOM_MAP),1)
 LDLIBS += -lrt
@@ -156,6 +173,12 @@ OBJS += libpcsxcore/new_dynarec/pcsxmem.o
  libpcsxcore/new_dynarec/new_dynarec.o: libpcsxcore/new_dynarec/assem_arm64.c
  else
  $(error no dynarec support for architecture $(ARCH))
+ endif
+ ifeq "$(NDRC_THREAD)" "1"
+ libpcsxcore/new_dynarec/new_dynarec.o: CFLAGS += -DNDRC_THREAD
+ libpcsxcore/new_dynarec/emu_if.o: CFLAGS += -DNDRC_THREAD
+ frontend/libretro.o: CFLAGS += -DNDRC_THREAD
+ USE_RTHREADS := 1
  endif
 else
 CFLAGS += -DDRC_DISABLE
@@ -232,11 +255,10 @@ CFLAGS += -DTHREAD_RENDERING
 OBJS += plugins/gpulib/gpulib_thread_if.o
 endif
 endif
+
 ifeq "$(BUILTIN_GPU)" "unai"
 CFLAGS += -DGPU_UNAI
 CFLAGS += -DUSE_GPULIB=1
-#CFLAGS += -DINLINE="static __inline__"
-#CFLAGS += -Dasm="__asm__ __volatile__"
 OBJS += plugins/gpu_unai/gpulib_if.o
 ifeq "$(ARCH)" "arm"
 OBJS += plugins/gpu_unai/gpu_arm.o
@@ -245,12 +267,16 @@ ifeq "$(THREAD_RENDERING)" "1"
 CFLAGS += -DTHREAD_RENDERING
 OBJS += plugins/gpulib/gpulib_thread_if.o
 endif
-plugins/gpu_unai/gpulib_if.o: CFLAGS += -DREARMED -O3 
+ifneq "$(GPU_UNAI_NO_OLD)" "1"
+OBJS += plugins/gpu_unai/old/if.o
+else
+CFLAGS += -DGPU_UNAI_NO_OLD
+endif
+plugins/gpu_unai/gpulib_if.o: CFLAGS += -DREARMED -DUSE_GPULIB=1
+plugins/gpu_unai/gpulib_if.o \
+plugins/gpu_unai/old/if.o: CFLAGS += -O3
 CC_LINK = $(CXX)
 endif
-
-# cdrcimg
-OBJS += plugins/cdrcimg/cdrcimg.o
 
 # libchdr
 ifeq "$(HAVE_CHD)" "1"
@@ -262,7 +288,7 @@ OBJS += $(LCHDR)/src/libchdr_cdrom.o
 OBJS += $(LCHDR)/src/libchdr_chd.o
 OBJS += $(LCHDR)/src/libchdr_flac.o
 OBJS += $(LCHDR)/src/libchdr_huffman.o
-$(LCHDR)/src/%.o: CFLAGS += -Wno-unused -std=gnu11
+$(LCHDR)/src/%.o: CFLAGS += -Wno-unused -Wno-maybe-uninitialized -Wno-format -std=gnu11
 OBJS += $(LCHDR_LZMA)/src/Alloc.o
 OBJS += $(LCHDR_LZMA)/src/CpuArch.o
 OBJS += $(LCHDR_LZMA)/src/Delta.o
@@ -287,7 +313,6 @@ $(LCHDR_ZSTD)/decompress/%.o: CFLAGS += -I$(LCHDR_ZSTD)
 $(LCHDR)/src/%.o: CFLAGS += -I$(LCHDR_ZSTD)
 libpcsxcore/cdriso.o: CFLAGS += -Wno-unused-function
 CFLAGS += -DHAVE_CHD -I$(LCHDR)/include
-LDFLAGS += -lm
 endif
 
 # frontend/gui
@@ -328,8 +353,7 @@ frontend/main.o frontend/menu.o: CFLAGS += -include frontend/pandora/ui_feat.h
 frontend/libpicofe/linux/plat.o: CFLAGS += -DPANDORA
 USE_PLUGIN_LIB = 1
 USE_FRONTEND = 1
-CFLAGS += -gdwarf-3 -ffunction-sections -fdata-sections
-LDFLAGS += -Wl,--gc-sections
+CFLAGS += -gdwarf-3
 endif
 ifeq "$(PLATFORM)" "caanoo"
 OBJS += frontend/libpicofe/gp2x/in_gp2x.o frontend/warm/warm.o
@@ -360,7 +384,6 @@ ifeq "$(HAVE_PHYSICAL_CDROM)" "1"
 OBJS += frontend/libretro-cdrom.o
 OBJS += deps/libretro-common/lists/string_list.o
 OBJS += deps/libretro-common/memmap/memalign.o
-OBJS += deps/libretro-common/rthreads/rthreads.o
 OBJS += deps/libretro-common/vfs/vfs_implementation_cdrom.o
 CFLAGS += -DHAVE_CDROM
 endif
@@ -374,15 +397,25 @@ OBJS += deps/libretro-common/time/rtime.o
 CFLAGS += -DUSE_LIBRETRO_VFS
 endif
 OBJS += frontend/libretro.o
-CFLAGS += -Ideps/libretro-common/include
 CFLAGS += -DFRONTEND_SUPPORTS_RGB565
 CFLAGS += -DHAVE_LIBRETRO
+INC_LIBRETRO_COMMON := 1
 
 ifneq ($(DYNAREC),lightrec)
 ifeq ($(MMAP_WIN32),1)
 OBJS += libpcsxcore/memmap_win32.o
 endif
 endif
+endif # $(PLATFORM) == "libretro"
+
+ifeq "$(USE_RTHREADS)" "1"
+OBJS += frontend/libretro-rthreads.o
+OBJS += deps/libretro-common/features/features_cpu.o
+frontend/main.o: CFLAGS += -DHAVE_RTHREADS
+INC_LIBRETRO_COMMON := 1
+endif
+ifeq "$(INC_LIBRETRO_COMMON)" "1"
+CFLAGS += -Ideps/libretro-common/include
 endif
 
 ifeq "$(USE_PLUGIN_LIB)" "1"
@@ -416,6 +449,8 @@ frontend/main.o: CFLAGS += -DBUILTIN_GPU=$(BUILTIN_GPU)
 frontend/menu.o frontend/main.o: frontend/revision.h
 frontend/plat_sdl.o frontend/libretro.o: frontend/revision.h
 
+CFLAGS += $(CFLAGS_LAST)
+
 frontend/libpicofe/%.c:
 	@echo "libpicofe module is missing, please run:"
 	@echo "git submodule init && git submodule update"
@@ -432,23 +467,22 @@ frontend/revision.h: FORCE
 %.o: %.S
 	$(CC_AS) $(CFLAGS) -c $^ -o $@
 
-%.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c -o $@ $<
-
-%.o: %.c
-	$(CC) $(CFLAGS) -c -o $@ $<
 
 target_: $(TARGET)
 
 $(TARGET): $(OBJS)
-ifeq ($(STATIC_LINKING), 1)
-	$(AR) rcs $@ $(OBJS)
+ifeq ($(PARTIAL_LINKING), 1)
+	$(LD) -o $(basename $(TARGET))1.o -r --gc-sections $(addprefix -u , $(shell cat frontend/libretro-extern)) $^
+	$(OBJCOPY) --keep-global-symbols=frontend/libretro-extern $(basename $(TARGET))1.o $(basename $(TARGET)).o
+	$(AR) rcs $@ $(basename $(TARGET)).o
+else ifeq ($(STATIC_LINKING), 1)
+	$(AR) rcs $@ $^
 else
 	$(CC_LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS) $(EXTRA_LDFLAGS)
 endif
 
 clean: $(PLAT_CLEAN) clean_plugins
-	$(RM) $(TARGET) $(OBJS) $(TARGET).map frontend/revision.h
+	$(RM) $(TARGET) *.o $(OBJS) $(TARGET).map frontend/revision.h
 
 ifneq ($(PLUGINS),)
 plugins_: $(PLUGINS)
@@ -466,6 +500,12 @@ clean_plugins:
 endif
 
 .PHONY: all clean target_ plugins_ clean_plugins FORCE
+
+ifneq "$(PLATFORM)" "pandora"
+ifdef CPATH
+$(warning warning: CPATH is defined)
+endif
+endif
 
 # ----------- release -----------
 

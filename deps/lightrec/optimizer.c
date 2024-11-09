@@ -909,8 +909,8 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 		/* Transform all opcodes detected as useless to real NOPs
 		 * (0x0: SLL r0, r0, #0) */
 		if (op->opcode != 0 && is_nop(op->c)) {
-			pr_debug("Converting useless opcode 0x%08x to NOP\n",
-					op->opcode);
+			pr_debug("Converting useless opcode "X32_FMT" to NOP\n",
+				 op->opcode);
 			op->opcode = 0x0;
 		}
 
@@ -1172,7 +1172,7 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 					break;
 				}
 
-				pr_debug("Multiply by power-of-two: %u\n",
+				pr_debug("Multiply by power-of-two: %"PRIu32"\n",
 					 v[op->r.rt].value);
 
 				if (op->r.op == OP_SPECIAL_MULT)
@@ -1440,13 +1440,11 @@ static int lightrec_swap_load_delays(struct lightrec_state *state,
 			switch (next.i.op) {
 			case OP_LWL:
 			case OP_LWR:
-			case OP_REGIMM:
-			case OP_BEQ:
-			case OP_BNE:
-			case OP_BLEZ:
-			case OP_BGTZ:
 				continue;
 			}
+
+			if (has_delay_slot(next))
+				continue;
 
 			if (opcode_reads_register(next, c.i.rt)
 			    && !opcode_writes_register(next, c.i.rs)) {
@@ -1481,7 +1479,7 @@ static int lightrec_local_branches(struct lightrec_state *state, struct block *b
 
 		offset = i + 1 + (s16)list->c.i.imm;
 
-		pr_debug("Found local branch to offset 0x%x\n", offset << 2);
+		pr_debug("Found local branch to offset 0x%"PRIx32"\n", offset << 2);
 
 		ds = get_delay_slot(block->opcode_list, i);
 		if (op_flag_load_delay(ds->flags) && opcode_is_load(ds->c)) {
@@ -1740,7 +1738,7 @@ static int lightrec_flag_io(struct lightrec_state *state, struct block *block)
 			 * registers as address will never hit a code page. */
 			if (list->i.rs >= 28 && list->i.rs <= 29 &&
 			    !state->maps[PSX_MAP_KERNEL_USER_RAM].ops) {
-				pr_debug("Flaging opcode 0x%08x as not requiring invalidation\n",
+				pr_debug("Flaging opcode "X32_FMT" as not requiring invalidation\n",
 					 list->opcode);
 				list->flags |= LIGHTREC_NO_INVALIDATE;
 			}
@@ -2245,7 +2243,7 @@ static int lightrec_replace_memset(struct lightrec_state *state, struct block *b
 
 		if (i == ARRAY_SIZE(memset_code) - 1) {
 			/* success! */
-			pr_debug("Block at PC 0x%x is a memset\n", block->pc);
+			pr_debug("Block at "PC_FMT" is a memset\n", block->pc);
 			block_set_flags(block,
 					BLOCK_IS_MEMSET | BLOCK_NEVER_COMPILE);
 

@@ -1,6 +1,7 @@
 #include "misc.h"
 #include "sio.h"
 #include "ppf.h"
+#include "cdrom-async.h"
 #include "new_dynarec/new_dynarec.h"
 #include "lightrec/plugin.h"
 
@@ -126,6 +127,8 @@ cycle_multiplier_overrides[] =
 	{ 222, { "SLES01549", "SLES02063", "SLES02064" } },
 	/* Digimon World */
 	{ 153, { "SLUS01032", "SLES02914" } },
+	/* Power Rangers: Lightspeed Rescue - jumping fails if FPS is over 30 */
+	{ 310, { "SLUS01114", "SLES03286" } },
 	/* Syphon Filter - reportedly hangs under unknown conditions */
 	{ 169, { "SCUS94240" } },
 	/* Psychic Detective - some weird race condition in the game's cdrom code */
@@ -135,6 +138,8 @@ cycle_multiplier_overrides[] =
 	{ 200, { "SCES02873" } },
 	/* Zero Divide - sometimes too fast */
 	{ 200, { "SLUS00183", "SLES00159", "SLPS00083", "SLPM80008" } },
+	/* Eagle One: Harrier Attack - hangs (but not in standalone build?) */
+	{ 153, { "SLUS00943" } },
 };
 
 static const struct
@@ -205,7 +210,7 @@ void Apply_Hacks_Cdrom(void)
 	}
 
 	/* Dynarec game-specific hacks */
-	new_dynarec_hacks_pergame = 0;
+	ndrc_g.hacks_pergame = 0;
 	Config.cycle_multiplier_override = 0;
 
 	for (i = 0; i < ARRAY_SIZE(cycle_multiplier_overrides); i++)
@@ -217,7 +222,7 @@ void Apply_Hacks_Cdrom(void)
 		if (j < ARRAY_SIZE(cycle_multiplier_overrides[i].id))
 		{
 			Config.cycle_multiplier_override = cycle_multiplier_overrides[i].mult;
-			new_dynarec_hacks_pergame |= NDHACK_OVERRIDE_CYCLE_M;
+			ndrc_g.hacks_pergame |= NDHACK_OVERRIDE_CYCLE_M;
 			SysPrintf("using cycle_multiplier_override: %d\n",
 				Config.cycle_multiplier_override);
 			break;
@@ -272,7 +277,9 @@ static const u16 libcrypt_sectors[16] = {
 int check_unsatisfied_libcrypt(void)
 {
 	const char *p = CdromId + 4;
+	u8 buf_sub[SUB_FRAMESIZE];
 	u16 id, key = 0;
+	u8 msf[3];
 	size_t i;
 
 	if (strncmp(CdromId, "SCE", 3) && strncmp(CdromId, "SLE", 3))
@@ -287,7 +294,8 @@ int check_unsatisfied_libcrypt(void)
 		return 0;
 
 	// detected a protected game
-	if (!CDR_getBufferSub(libcrypt_sectors[0]) && !sbi_sectors) {
+	lba2msf(libcrypt_sectors[0] + 150, &msf[0], &msf[1], &msf[2]);
+	if (!sbi_sectors && cdra_readSub(msf, buf_sub) != 0) {
 		SysPrintf("==================================================\n");
 		SysPrintf("LibCrypt game detected with missing SBI/subchannel\n");
 		SysPrintf("==================================================\n");

@@ -26,6 +26,7 @@
 #include <assert.h>
 #include "misc.h"
 #include "cdrom.h"
+#include "cdrom-async.h"
 #include "mdec.h"
 #include "gpu.h"
 #include "ppf.h"
@@ -76,17 +77,12 @@ static void mmssdd( char *b, char *p )
 	s = block / 75;				// seconds
 	d = block - s * 75;			// seconds rest
 
-	m = ((m / 10) << 4) | m % 10;
-	s = ((s / 10) << 4) | s % 10;
-	d = ((d / 10) << 4) | d % 10;
-
 	p[0] = m;
 	p[1] = s;
 	p[2] = d;
 }
 
 #define incTime() \
-	time[0] = btoi(time[0]); time[1] = btoi(time[1]); time[2] = btoi(time[2]); \
 	time[2]++; \
 	if(time[2] == 75) { \
 		time[2] = 0; \
@@ -96,11 +92,10 @@ static void mmssdd( char *b, char *p )
 			time[0]++; \
 		} \
 	} \
-	time[0] = itob(time[0]); time[1] = itob(time[1]); time[2] = itob(time[2]);
 
 #define READTRACK() \
-	if (!CDR_readTrack(time)) return -1; \
-	buf = (void *)CDR_getBuffer(); \
+	if (cdra_readTrack(time)) return -1; \
+	buf = cdra_getBuffer(); \
 	if (buf == NULL) return -1; \
 	else CheckPPFCache((u8 *)buf, time[0], time[1], time[2]);
 
@@ -221,7 +216,7 @@ int LoadCdrom() {
 			return 0;
 	}
 
-	time[0] = itob(0); time[1] = itob(2); time[2] = itob(0x10);
+	time[0] = 0; time[1] = 2; time[2] = 0x10;
 
 	READTRACK();
 
@@ -325,7 +320,7 @@ int LoadCdromFile(const char *filename, EXE_HEADER *head, u8 *time_bcd_out) {
 		p1++;
 	snprintf(exename, sizeof(exename), "%s", p1);
 
-	time[0] = itob(0); time[1] = itob(2); time[2] = itob(0x10);
+	time[0] = 0; time[1] = 2; time[2] = 0x10;
 
 	READTRACK();
 
@@ -379,14 +374,14 @@ int CheckCdrom() {
 	memset(CdromId, 0, sizeof(CdromId));
 	memset(exename, 0, sizeof(exename));
 
-	time[0] = itob(0);
-	time[1] = itob(2);
-	time[2] = itob(0x10);
+	time[0] = 0;
+	time[1] = 2;
+	time[2] = 0x10;
 
 	if (!Config.HLE && Config.SlowBoot) {
 		// boot to BIOS in case of CDDA or lid is open
-		CDR_getStatus(&stat);
-		if ((stat.Status & 0x10) || stat.Type == 2 || !CDR_readTrack(time))
+		cdra_getStatus(&stat);
+		if ((stat.Status & 0x10) || stat.Type == 2 || cdra_readTrack(time))
 			return 0;
 	}
 	READTRACK();
@@ -442,7 +437,7 @@ int CheckCdrom() {
 		for (i = 0; i < len; ++i) {
 			if (exename[i] == ';' || c >= sizeof(CdromId) - 1)
 				break;
-			if (isalnum(exename[i]))
+			if (isalnum((int)exename[i]))
 				CdromId[c++] = exename[i];
 		}
 	}
@@ -475,7 +470,7 @@ int CheckCdrom() {
 	cb_itf.cb_rom_info_set(NULL, CdromId, 0);
 #endif
 
-	BuildPPFCache();
+	BuildPPFCache(NULL);
 
 	return 0;
 }
@@ -594,7 +589,7 @@ int Load(const char *ExePath) {
 						case 0: /* End of file */
 							break;
 						default:
-							SysPrintf(_("Unknown CPE opcode %02x at position %08x.\n"), opcode, ftell(tmpFile) - 1);
+							SysPrintf(_("Unknown CPE opcode %02x at position %08zx.\n"), opcode, ftell(tmpFile) - 1);
 							retval = -1;
 							break;
 					}
@@ -749,7 +744,7 @@ int SaveState(const char *file) {
 	psxHwFreeze(f, 1);
 	psxRcntFreeze(f, 1);
 	mdecFreeze(f, 1);
-	new_dyna_freeze(f, 1);
+	ndrc_freeze(f, 1);
 	padFreeze(f, 1);
 
 	result = 0;
@@ -793,7 +788,9 @@ int LoadState(const char *file) {
 	SaveFuncs.read(f, psxH, 0x00010000);
 	SaveFuncs.read(f, &psxRegs, offsetof(psxRegisters, gteBusyCycle));
 	psxRegs.gteBusyCycle = psxRegs.cycle;
+	psxRegs.branching = 0;
 	psxRegs.biosBranchCheck = ~0;
+	psxRegs.cpuInRecursion = 0;
 	psxRegs.gpuIdleAfter = psxRegs.cycle - 1;
 	HW_GPU_STATUS &= SWAP32(~PSXGPU_nBUSY);
 	if (misc->magic == MISC_MAGIC) {
@@ -806,8 +803,6 @@ int LoadState(const char *file) {
 		frame_counter = misc->frame_counter;
 		CdromFrontendId = misc->CdromFrontendId;
 	}
-
-	psxCpu->Notify(R3000ACPU_NOTIFY_AFTER_LOAD, NULL);
 
 	if (Config.HLE)
 		psxBiosFreeze(0);
@@ -833,12 +828,14 @@ int LoadState(const char *file) {
 	psxHwFreeze(f, 0);
 	psxRcntFreeze(f, 0);
 	mdecFreeze(f, 0);
-	new_dyna_freeze(f, 0);
+	ndrc_freeze(f, 0);
 	padFreeze(f, 0);
 
 	events_restore();
 	if (Config.HLE)
 		psxBiosCheckExe(biosBranchCheckOld, 0x60, 1);
+
+	psxCpu->Notify(R3000ACPU_NOTIFY_AFTER_LOAD, NULL);
 
 	result = 0;
 cleanup:
@@ -976,7 +973,7 @@ static unsigned short crctab[256] = {
 	0x2E93, 0x3EB2, 0x0ED1, 0x1EF0
 };
 
-u16 calcCrc(u8 *d, int len) {
+u16 calcCrc(const u8 *d, int len) {
 	u16 crc = 0;
 	int i;
 

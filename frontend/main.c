@@ -14,6 +14,9 @@
 #if !defined(_WIN32) && !defined(NO_DYLIB)
 #include <dlfcn.h>
 #endif
+#ifdef HAVE_RTHREADS
+#include "../frontend/libretro-rthreads.h"
+#endif
 
 #include "main.h"
 #include "plugin.h"
@@ -25,6 +28,7 @@
 #include "../libpcsxcore/cheat.h"
 #include "../libpcsxcore/sio.h"
 #include "../libpcsxcore/database.h"
+#include "../libpcsxcore/cdrom-async.h"
 #include "../libpcsxcore/new_dynarec/new_dynarec.h"
 #include "../plugins/cdrcimg/cdrcimg.h"
 #include "../plugins/dfsound/spu_config.h"
@@ -66,7 +70,7 @@ enum sched_action emu_action, emu_action_old;
 char hud_msg[64];
 int hud_new_msg;
 
-static void make_path(char *buf, size_t size, const char *dir, const char *fname)
+static inline void make_path(char *buf, size_t size, const char *dir, const char *fname)
 {
 	if (fname)
 		snprintf(buf, size, ".%s%s", dir, fname);
@@ -95,21 +99,7 @@ static int get_gameid_filename(char *buf, int size, const char *fmt, int i) {
 
 void set_cd_image(const char *fname)
 {
-	const char *ext = NULL;
-	
-	if (fname != NULL)
-		ext = strrchr(fname, '.');
-
-	if (ext && (
-	    strcasecmp(ext, ".z") == 0 || strcasecmp(ext, ".bz") == 0 ||
-	    strcasecmp(ext, ".znx") == 0 /*|| strcasecmp(ext, ".pbp") == 0*/)) {
-		SetIsoFile(NULL);
-		cdrcimg_set_fname(fname);
-		strcpy(Config.Cdr, "builtin_cdrcimg");
-	} else {
-		SetIsoFile(fname);
-		strcpy(Config.Cdr, "builtin_cdr");
-	}
+	SetIsoFile(fname);
 }
 
 static void set_default_paths(void)
@@ -124,7 +114,6 @@ static void set_default_paths(void)
 	strcpy(Config.PluginsDir, "plugins");
 	strcpy(Config.Gpu, "builtin_gpu");
 	strcpy(Config.Spu, "builtin_spu");
-	strcpy(Config.Cdr, "builtin_cdr");
 	strcpy(Config.Pad1, "builtin_pad");
 	strcpy(Config.Pad2, "builtin_pad");
 	strcpy(Config.Net, "Disabled");
@@ -141,19 +130,19 @@ void emu_set_default_config(void)
 	Config.FractionalFramerate = -1;
 
 	pl_rearmed_cbs.gpu_neon.allow_interlace = 2; // auto
+	pl_rearmed_cbs.gpu_neon.allow_dithering = 1;
 	pl_rearmed_cbs.gpu_neon.enhancement_enable =
 	pl_rearmed_cbs.gpu_neon.enhancement_no_main = 0;
+	pl_rearmed_cbs.gpu_neon.enhancement_tex_adj = 1;
 	pl_rearmed_cbs.gpu_peops.iUseDither = 0;
 	pl_rearmed_cbs.gpu_peops.dwActFixes = 1<<7;
+	pl_rearmed_cbs.gpu_unai.old_renderer = 0;
 	pl_rearmed_cbs.gpu_unai.ilace_force = 0;
 	pl_rearmed_cbs.gpu_unai.pixel_skip = 0;
 	pl_rearmed_cbs.gpu_unai.lighting = 1;
 	pl_rearmed_cbs.gpu_unai.fast_lighting = 0;
 	pl_rearmed_cbs.gpu_unai.blending = 1;
 	pl_rearmed_cbs.gpu_unai.dithering = 0;
-	pl_rearmed_cbs.gpu_unai_old.abe_hack =
-	pl_rearmed_cbs.gpu_unai_old.no_light =
-	pl_rearmed_cbs.gpu_unai_old.no_blend = 0;
 	memset(&pl_rearmed_cbs.gpu_peopsgl, 0, sizeof(pl_rearmed_cbs.gpu_peopsgl));
 	pl_rearmed_cbs.gpu_peopsgl.iVRamSize = 64;
 	pl_rearmed_cbs.gpu_peopsgl.iTexGarbageCollection = 1;
@@ -172,7 +161,7 @@ void emu_set_default_config(void)
 	spu_config.iTempo = 1;
 #endif
 #endif
-	new_dynarec_hacks = 0;
+	ndrc_g.hacks = 0;
 
 	in_type[0] = PSE_PAD_TYPE_STANDARD;
 	in_type[1] = PSE_PAD_TYPE_STANDARD;
@@ -523,7 +512,11 @@ int emu_core_preinit(void)
 int emu_core_init(void)
 {
 	SysPrintf("Starting PCSX-ReARMed " REV "%s\n", get_build_info());
+	SysPrintf("build time: " __DATE__ " " __TIME__ "\n");
 
+#ifdef HAVE_RTHREADS
+	pcsxr_sthread_init();
+#endif
 #ifndef NO_FRONTEND
 	check_profile();
 	check_memcards();
@@ -545,7 +538,7 @@ int emu_core_init(void)
 
 void emu_core_ask_exit(void)
 {
-	stop++;
+	psxRegs.stop++;
 	g_emu_want_quit = 1;
 }
 
@@ -741,10 +734,10 @@ int main(int argc, char *argv[])
 
 	while (!g_emu_want_quit)
 	{
-		stop = 0;
+		psxRegs.stop = 0;
 		emu_action = SACTION_NONE;
 
-		psxCpu->Execute();
+		psxCpu->Execute(&psxRegs);
 		if (emu_action != SACTION_NONE)
 			do_emu_action();
 	}
@@ -818,9 +811,6 @@ void SysReset() {
 	// reset can run code, timing must be set
 	pl_timing_prepare(Config.PsxType);
 
-	// hmh core forgets this
-	CDR_stop();
-   
 	EmuReset();
 
 	GPU_updateLace = real_lace;
@@ -945,7 +935,7 @@ static int _OpenPlugins(void) {
 	signal(SIGPIPE, SignalExit);
 #endif
 
-	ret = CDR_open();
+	ret = cdra_open();
 	if (ret < 0) { SysMessage(_("Error opening CD-ROM plugin!")); return -1; }
 	ret = SPU_open();
 	if (ret < 0) { SysMessage(_("Error opening SPU plugin!")); return -1; }
@@ -958,64 +948,6 @@ static int _OpenPlugins(void) {
 	if (ret < 0) { SysMessage(_("Error opening Controller 1 plugin!")); return -1; }
 	ret = PAD2_open(&gpuDisp);
 	if (ret < 0) { SysMessage(_("Error opening Controller 2 plugin!")); return -1; }
-
-	if (Config.UseNet && !NetOpened) {
-		netInfo info;
-		char path[MAXPATHLEN * 2];
-		char dotdir[MAXPATHLEN];
-
-		MAKE_PATH(dotdir, "/.pcsx/plugins/", NULL);
-
-		strcpy(info.EmuName, "PCSX");
-		memcpy(info.CdromID, CdromId, 9); /* no \0 trailing character? */
-		memcpy(info.CdromLabel, CdromLabel, 9);
-		info.CdromLabel[9] = '\0';
-		info.psxMem = psxM;
-		info.GPU_showScreenPic = GPU_showScreenPic;
-		info.GPU_displayText = GPU_displayText;
-		info.GPU_showScreenPic = GPU_showScreenPic;
-		info.PAD_setSensitive = PAD1_setSensitive;
-		sprintf(path, "%s%s", Config.BiosDir, Config.Bios);
-		strcpy(info.BIOSpath, path);
-		strcpy(info.MCD1path, Config.Mcd1);
-		strcpy(info.MCD2path, Config.Mcd2);
-		sprintf(path, "%s%s", dotdir, Config.Gpu);
-		strcpy(info.GPUpath, path);
-		sprintf(path, "%s%s", dotdir, Config.Spu);
-		strcpy(info.SPUpath, path);
-		sprintf(path, "%s%s", dotdir, Config.Cdr);
-		strcpy(info.CDRpath, path);
-		NET_setInfo(&info);
-
-		ret = NET_open(&gpuDisp);
-		if (ret < 0) {
-			if (ret == -2) {
-				// -2 is returned when something in the info
-				// changed and needs to be synced
-				char *ptr;
-
-				PARSEPATH(Config.Bios, info.BIOSpath);
-				PARSEPATH(Config.Gpu,  info.GPUpath);
-				PARSEPATH(Config.Spu,  info.SPUpath);
-				PARSEPATH(Config.Cdr,  info.CDRpath);
-
-				strcpy(Config.Mcd1, info.MCD1path);
-				strcpy(Config.Mcd2, info.MCD2path);
-				return -2;
-			} else {
-				Config.UseNet = FALSE;
-			}
-		} else {
-			if (NET_queryPlayer() == 1) {
-				if (SendPcsxInfo() == -1) Config.UseNet = FALSE;
-			} else {
-				if (RecvPcsxInfo() == -1) Config.UseNet = FALSE;
-			}
-		}
-		NetOpened = TRUE;
-	} else if (Config.UseNet) {
-		NET_resume();
-	}
 
 	return 0;
 }
@@ -1039,32 +971,25 @@ void ClosePlugins() {
 	signal(SIGPIPE, SIG_DFL);
 #endif
 
-	ret = CDR_close();
-	if (ret < 0) { SysMessage(_("Error closing CD-ROM plugin!")); return; }
+	cdra_close();
 	ret = SPU_close();
-	if (ret < 0) { SysMessage(_("Error closing SPU plugin!")); return; }
+	if (ret < 0) { SysMessage(_("Error closing SPU plugin!")); }
 	ret = PAD1_close();
-	if (ret < 0) { SysMessage(_("Error closing Controller 1 Plugin!")); return; }
+	if (ret < 0) { SysMessage(_("Error closing Controller 1 Plugin!")); }
 	ret = PAD2_close();
-	if (ret < 0) { SysMessage(_("Error closing Controller 2 plugin!")); return; }
+	if (ret < 0) { SysMessage(_("Error closing Controller 2 plugin!")); }
 	// pcsx-rearmed: we handle gpu elsewhere
 	//ret = GPU_close();
 	//if (ret < 0) { SysMessage(_("Error closing GPU plugin!")); return; }
-
-	if (Config.UseNet) {
-		NET_pause();
-	}
 }
 
 /* we hook statically linked plugins here */
 static const char *builtin_plugins[] = {
-	"builtin_gpu", "builtin_spu", "builtin_cdr", "builtin_pad",
-	"builtin_cdrcimg",
+	"builtin_gpu", "builtin_spu", "builtin_pad",
 };
 
 static const int builtin_plugin_ids[] = {
-	PLUGIN_GPU, PLUGIN_SPU, PLUGIN_CDR, PLUGIN_PAD,
-	PLUGIN_CDRCIMG,
+	PLUGIN_GPU, PLUGIN_SPU, PLUGIN_PAD,
 };
 
 void *SysLoadLibrary(const char *lib) {

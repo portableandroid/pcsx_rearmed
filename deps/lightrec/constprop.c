@@ -59,7 +59,7 @@ static void lightrec_propagate_addi(u32 rs, u32 rd,
 				    const struct constprop_data *d,
 				    struct constprop_data *v)
 {
-	u32 end, bit, sum, min, mask, imm, value;
+	u32 end, bit, sum, min, max, mask, imm, value;
 	struct constprop_data result = {
 		.value = v[rd].value,
 		.known = v[rd].known,
@@ -110,6 +110,15 @@ static void lightrec_propagate_addi(u32 rs, u32 rd,
 					 * sign bits are known. */
 					min = get_min_value(&v[rs])
 						+ get_min_value(d);
+					max = get_max_value(&v[rs])
+						+ get_max_value(d);
+
+					/* The sum may have less sign bits */
+					if ((s32)min < 0)
+						mask &= min & max;
+					else
+						mask &= ~(min | mask);
+
 					result.value = (min & mask)
 						| (result.value & ~mask);
 					result.known |= mask << carry;
@@ -736,7 +745,7 @@ lightrec_get_constprop_map(const struct lightrec_state *state,
 	if ((min & 0xe0000000) != (max & 0xe0000000))
 		return PSX_MAP_UNKNOWN;
 
-	pr_debug("Min: 0x%08x max: 0x%08x Known: 0x%08x Sign: 0x%08x\n",
+	pr_debug("Min: "X32_FMT" max: "X32_FMT" Known: "X32_FMT" Sign: "X32_FMT"\n",
 		 min, max, v[reg].known, v[reg].sign);
 
 	min = kunseg(min);

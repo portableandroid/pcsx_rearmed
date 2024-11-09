@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../gpulib/gpu.h"
+#include "old/if.h"
 
 #ifdef THREAD_RENDERING
 #include "../gpulib/gpulib_thread_if.h"
@@ -67,6 +68,12 @@
 #include "gpu_command.h"
 
 /////////////////////////////////////////////////////////////////////////////
+
+#ifndef GPU_UNAI_NO_OLD
+#define IS_OLD_RENDERER() gpu_unai.config.old_renderer
+#else
+#define IS_OLD_RENDERER() false
+#endif
 
 #define DOWNSCALE_VRAM_SIZE (1024 * 512 * 2 * 2 + 4096)
 
@@ -201,8 +208,9 @@ static void map_downscale_buffer(void)
 
   gpu_unai.downscale_vram = (le16_t*)gpu.mmap(DOWNSCALE_VRAM_SIZE);
 
-  if (gpu_unai.downscale_vram == NULL) {
+  if (gpu_unai.downscale_vram == NULL || gpu_unai.downscale_vram == (le16_t *)(intptr_t)-1) {
     fprintf(stderr, "failed to map downscale buffer\n");
+    gpu_unai.downscale_vram = NULL;
     gpu.get_downscale_buffer = NULL;
   }
   else {
@@ -246,7 +254,7 @@ int renderer_init(void)
   //gpu_unai.config.enableAbbeyHack = gpu_unai_config_ext.abe_hack;
   gpu_unai.ilace_mask = gpu_unai.config.ilace_force;
 
-#ifdef GPU_UNAI_USE_INT_DIV_MULTINV
+#if defined(GPU_UNAI_USE_INT_DIV_MULTINV) || (!defined(GPU_UNAI_NO_OLD) && !defined(GPU_UNAI_USE_FLOATMATH))
   // s_invTable
   for(int i=1;i<=(1<<TABLE_BITS);++i)
   {
@@ -401,6 +409,9 @@ int do_cmd_list(u32 *list_, int list_len,
   le32_t *list = (le32_t *)list_;
   le32_t *list_start = list;
   le32_t *list_end = list + list_len;
+
+  if (IS_OLD_RENDERER())
+    return oldunai_do_cmd_list(list_, list_len, cycles_sum_out, cycles_last, last_cmd);
 
   //TODO: set ilace_mask when resolution changes instead of every time,
   // eliminate #ifdef below.
@@ -696,7 +707,7 @@ int do_cmd_list(u32 *list_, int list_len,
         // Strip lower 3 bits of each color and determine if lighting should be used:
         if ((le32_raw(gpu_unai.PacketBuffer.U4[0]) & HTOLE32(0xF8F8F8)) != HTOLE32(0x808080))
           driver_idx |= Lighting;
-        PS driver = gpuSpriteSpanDrivers[driver_idx];
+        PS driver = gpuSpriteDrivers[driver_idx];
         gpuDrawS(packet, driver, &w, &h);
         gput_sum(cpu_cycles_sum, cpu_cycles, gput_sprite(w, h));
       } break;
@@ -737,7 +748,7 @@ int do_cmd_list(u32 *list_, int list_len,
         // Strip lower 3 bits of each color and determine if lighting should be used:
         if ((le32_raw(gpu_unai.PacketBuffer.U4[0]) & HTOLE32(0xF8F8F8)) != HTOLE32(0x808080))
           driver_idx |= Lighting;
-        PS driver = gpuSpriteSpanDrivers[driver_idx];
+        PS driver = gpuSpriteDrivers[driver_idx];
         gpuDrawS(packet, driver, &w, &h);
         gput_sum(cpu_cycles_sum, cpu_cycles, gput_sprite(w, h));
       } break;
@@ -755,17 +766,6 @@ int do_cmd_list(u32 *list_, int list_len,
 
       case 0x7C:
       case 0x7D:
-#ifdef __arm__
-        if ((gpu_unai.GPU_GP1 & 0x180) == 0 && (gpu_unai.Masking | gpu_unai.PixelMSB) == 0)
-        {
-          s32 w = 0, h = 0;
-          gpuSetCLUT(le32_to_u32(gpu_unai.PacketBuffer.U4[2]) >> 16);
-          gpuDrawS16(packet, &w, &h);
-          gput_sum(cpu_cycles_sum, cpu_cycles, gput_sprite(w, h));
-          break;
-        }
-        // fallthrough
-#endif
       case 0x7E:
       case 0x7F: {          // Textured rectangle (16x16)
         gpu_unai.PacketBuffer.U4[3] = u32_to_le32(0x00100010);
@@ -777,7 +777,7 @@ int do_cmd_list(u32 *list_, int list_len,
         // Strip lower 3 bits of each color and determine if lighting should be used:
         if ((le32_raw(gpu_unai.PacketBuffer.U4[0]) & HTOLE32(0xF8F8F8)) != HTOLE32(0x808080))
           driver_idx |= Lighting;
-        PS driver = gpuSpriteSpanDrivers[driver_idx];
+        PS driver = gpuSpriteDrivers[driver_idx];
         gpuDrawS(packet, driver, &w, &h);
         gput_sum(cpu_cycles_sum, cpu_cycles, gput_sprite(w, h));
       } break;
@@ -824,8 +824,12 @@ breakloop:
 
 void renderer_sync_ecmds(u32 *ecmds)
 {
-  int dummy;
-  do_cmd_list(&ecmds[1], 6, &dummy, &dummy, &dummy);
+  if (!IS_OLD_RENDERER()) {
+    int dummy;
+    do_cmd_list(&ecmds[1], 6, &dummy, &dummy, &dummy);
+  }
+  else
+    oldunai_renderer_sync_ecmds(ecmds);
 }
 
 void renderer_update_caches(int x, int y, int w, int h, int state_changed)
@@ -845,6 +849,7 @@ void renderer_set_interlace(int enable, int is_odd)
 void renderer_set_config(const struct rearmed_cbs *cbs)
 {
   gpu_unai.vram = (le16_t *)gpu.vram;
+  gpu_unai.config.old_renderer  = cbs->gpu_unai.old_renderer;
   gpu_unai.config.ilace_force   = cbs->gpu_unai.ilace_force;
   gpu_unai.config.pixel_skip    = cbs->gpu_unai.pixel_skip;
   gpu_unai.config.lighting      = cbs->gpu_unai.lighting;
@@ -859,6 +864,7 @@ void renderer_set_config(const struct rearmed_cbs *cbs)
   } else {
     unmap_downscale_buffer();
   }
+  oldunai_renderer_set_config(cbs);
 }
 
 void renderer_sync(void)
