@@ -57,6 +57,7 @@ static Jit g_jit;
 
 //#define DISASM
 //#define ASSEM_PRINT
+//#define ASSEM_PRINT_ADDRS
 //#define REGMAP_PRINT // with DISASM only
 //#define INV_DEBUG_W
 //#define STAT_PRINT
@@ -65,6 +66,12 @@ static Jit g_jit;
 #define assem_debug printf
 #else
 #define assem_debug(...)
+#endif
+#ifdef ASSEM_PRINT_ADDRS
+#define log_addr(a) (a)
+#else
+// for diff-able output
+#define log_addr(a) ((u_long)(a) <= 1024u ? (void *)(a) : (void *)0xadd0l)
 #endif
 //#define inv_debug printf
 #define inv_debug(...)
@@ -75,6 +82,7 @@ extern int last_count;  // last absolute target, often = next_interupt
 
 extern int reg_cop2d[], reg_cop2c[];
 
+extern void *hash_table_ptr;
 extern uintptr_t ram_offset;
 extern uintptr_t mini_ht[32][2];
 
@@ -252,7 +260,7 @@ static struct decoded_insn
   u_char is_delay_load:1; // is_load + MFC/CFC
   u_char is_exception:1;  // unconditional, also interp. fallback
   u_char may_except:1;    // might generate an exception
-  u_char ls_type:2;       // load/store type (ls_width_type)
+  u_char ls_type:2;       // load/store type (ls_width_type LS_*)
 } dops[MAXBLOCK];
 
 enum ls_width_type {
@@ -307,7 +315,9 @@ static struct compile_info
   static void *copy;
   static u_int expirep;
   static u_int stop_after_jal;
+  static u_int ni_count;
   static u_int f1_hack;
+  static u_int vsync_hack;
 #ifdef STAT_PRINT
   static int stat_bc_direct;
   static int stat_bc_pre;
@@ -397,11 +407,9 @@ void jump_overflow_ds(u_int u0, u_int u1, u_int pc);
 void jump_addrerror   (u_int cause, u_int addr, u_int pc);
 void jump_addrerror_ds(u_int cause, u_int addr, u_int pc);
 void jump_to_new_pc();
-void call_gteStall();
 void new_dyna_leave();
 
-void *ndrc_get_addr_ht(u_int vaddr);
-void ndrc_add_jump_out(u_int vaddr, void *src);
+void *ndrc_get_addr_ht(u_int vaddr, struct ht_entry *ht);
 void ndrc_write_invalidate_one(u_int addr);
 static void ndrc_write_invalidate_many(u_int addr, u_int end);
 
@@ -473,12 +481,7 @@ static void mprotect_w_x(void *start, void *end, int is_x)
 #endif
 }
 
-static void start_tcache_write(void *start, void *end)
-{
-  mprotect_w_x(start, end, 0);
-}
-
-static void end_tcache_write(void *start, void *end)
+void new_dyna_clear_cache(void *start, void *end)
 {
 #if defined(__arm__) || defined(__aarch64__)
   size_t len = (char *)end - (char *)start;
@@ -494,7 +497,6 @@ static void end_tcache_write(void *start, void *end)
     ctr_clear_cache_range(start, end);
   else
     ctr_clear_cache();
-  ndrc_g.thread.cache_dirty = 1;
   #elif defined(HAVE_LIBNX)
   if (g_jit.type == JitType_CodeMemory) {
     armDCacheClean(start, len);
@@ -511,6 +513,22 @@ static void end_tcache_write(void *start, void *end)
   #endif
   (void)len;
 #endif
+}
+
+static void start_tcache_write(void *start, void *end)
+{
+  mprotect_w_x(start, end, 0);
+}
+
+static void end_tcache_write(void *start, void *end)
+{
+#ifdef NDRC_THREAD
+  if (!ndrc_g.thread.dirty_start || (size_t)ndrc_g.thread.dirty_start > (size_t)start)
+    ndrc_g.thread.dirty_start = start;
+  if ((size_t)ndrc_g.thread.dirty_end < (size_t)end)
+    ndrc_g.thread.dirty_end = end;
+#endif
+  new_dyna_clear_cache(start, end);
 
   mprotect_w_x(start, end, 1);
 }
@@ -642,9 +660,14 @@ static u_int get_page_prev(u_int vaddr)
   return page;
 }
 
+static struct ht_entry *hash_table_get_p(struct ht_entry *ht, u_int vaddr)
+{
+  return &ht[((vaddr >> 16) ^ vaddr) & 0xFFFF];
+}
+
 static struct ht_entry *hash_table_get(u_int vaddr)
 {
-  return &hash_table[((vaddr>>16)^vaddr)&0xFFFF];
+  return hash_table_get_p(hash_table, vaddr);
 }
 
 #define HASH_TABLE_BAD 0xbac
@@ -805,7 +828,8 @@ static noinline u_int generate_exception(u_int pc)
 
 // Get address from virtual address
 // This is called from the recompiled JR/JALR instructions
-static void noinline *get_addr(const u_int vaddr, enum ndrc_compile_mode compile_mode)
+static void noinline *get_addr(struct ht_entry *ht, const u_int vaddr,
+  enum ndrc_compile_mode compile_mode)
 {
   u_int start_page = get_page_prev(vaddr);
   u_int i, page, end_page = get_page(vaddr);
@@ -846,31 +870,32 @@ static void noinline *get_addr(const u_int vaddr, enum ndrc_compile_mode compile
 
   int r = new_recompile_block(vaddr);
   if (likely(r == 0))
-    return ndrc_get_addr_ht(vaddr);
+    return ndrc_get_addr_ht(vaddr, ht);
 
   if (compile_mode == ndrc_cm_compile_live)
-    return ndrc_get_addr_ht(generate_exception(vaddr));
+    return ndrc_get_addr_ht(generate_exception(vaddr), ht);
 
   return NULL;
 }
 
 // Look up address in hash table first
-void *ndrc_get_addr_ht_param(unsigned int vaddr, enum ndrc_compile_mode compile_mode)
+void *ndrc_get_addr_ht_param(struct ht_entry *ht, unsigned int vaddr,
+  enum ndrc_compile_mode compile_mode)
 {
   //check_for_block_changes(vaddr, vaddr + MAXBLOCK);
-  const struct ht_entry *ht_bin = hash_table_get(vaddr);
+  const struct ht_entry *ht_bin = hash_table_get_p(ht, vaddr);
   u_int vaddr_a = vaddr & ~3;
   stat_inc(stat_ht_lookups);
   if (ht_bin->vaddr[0] == vaddr_a) return ht_bin->tcaddr[0];
   if (ht_bin->vaddr[1] == vaddr_a) return ht_bin->tcaddr[1];
-  return get_addr(vaddr, compile_mode);
+  return get_addr(ht, vaddr, compile_mode);
 }
 
 // "usual" addr lookup for indirect branches, etc
 // to be used by currently running code only
-void *ndrc_get_addr_ht(u_int vaddr)
+void *ndrc_get_addr_ht(u_int vaddr, struct ht_entry *ht)
 {
-  return ndrc_get_addr_ht_param(vaddr, ndrc_cm_compile_live);
+  return ndrc_get_addr_ht_param(ht, vaddr, ndrc_cm_compile_live);
 }
 
 static void clear_all_regs(signed char regmap[])
@@ -1270,7 +1295,6 @@ static const struct {
   FUNCNAME(jump_overflow_ds),
   FUNCNAME(jump_addrerror),
   FUNCNAME(jump_addrerror_ds),
-  FUNCNAME(call_gteStall),
   FUNCNAME(new_dyna_leave),
   FUNCNAME(pcsx_mtc0),
   FUNCNAME(pcsx_mtc0_ds),
@@ -1317,6 +1341,7 @@ static const char *fpofs_name(u_int ofs)
   ofscase(psxH_ptr);
   ofscase(invc_ptr);
   ofscase(ram_offset);
+  ofscase(hash_table_ptr);
   #undef ofscase
   }
   buf[0] = 0;
@@ -1691,15 +1716,15 @@ void new_dynarec_invalidate_all_pages(void)
 }
 
 // Add an entry to jump_out after making a link
-// src should point to code by emit_extjump()
-void ndrc_add_jump_out(u_int vaddr, void *src)
+// stub should point to stub code by emit_extjump()
+static void ndrc_add_jump_out(u_int vaddr, void *stub)
 {
-  inv_debug("ndrc_add_jump_out: %p -> %x\n", src, vaddr);
+  inv_debug("ndrc_add_jump_out: %p -> %x\n", stub, vaddr);
   u_int page = get_page(vaddr);
   struct jump_info *ji;
 
   stat_inc(stat_links);
-  check_extjump2(src);
+  check_extjump2(stub);
   ji = jumps[page];
   if (ji == NULL) {
     ji = malloc(sizeof(*ji) + sizeof(ji->e[0]) * 16);
@@ -1712,8 +1737,28 @@ void ndrc_add_jump_out(u_int vaddr, void *src)
   }
   jumps[page] = ji;
   ji->e[ji->count].target_vaddr = vaddr;
-  ji->e[ji->count].stub = src;
+  ji->e[ji->count].stub = stub;
   ji->count++;
+}
+
+void ndrc_patch_link(u_int vaddr, void *insn, void *stub, void *target)
+{
+  void *insn_end = (char *)insn + 4;
+
+  //start_tcache_write(insn, insn_end);
+  mprotect_w_x(insn, insn_end, 0);
+
+  assert(target != stub);
+  set_jump_target_far1(insn, target);
+  ndrc_add_jump_out(vaddr, stub);
+
+#if defined(__aarch64__) || defined(NO_WRITE_EXEC)
+  // arm64: no syscall concerns, dyna_linker lacks stale detection
+  // w^x: have to do costly permission switching anyway
+  new_dyna_clear_cache(NDRC_WRITE_OFFSET(insn), NDRC_WRITE_OFFSET(insn_end));
+#endif
+  //end_tcache_write(insn, insn_end);
+  mprotect_w_x(insn, insn_end, 1);
 }
 
 /* Register allocation */
@@ -3439,9 +3484,10 @@ static void store_assemble(int i, const struct regstat *i_regs, int ccadj_)
     if(i_regs->regmap==regs[i].regmap) {
       load_all_consts(regs[i].regmap_entry,regs[i].wasdirty,i);
       wb_dirtys(regs[i].regmap_entry,regs[i].wasdirty);
-      emit_movimm(start+i*4+4,0);
-      emit_writeword(0,&psxRegs.pc);
-      emit_addimm(HOST_CCREG,2,HOST_CCREG);
+      emit_readptr(&hash_table_ptr, 1);
+      emit_movimm(start+i*4+4, 0);
+      emit_writeword(0, &psxRegs.pc);
+      emit_addimm(HOST_CCREG, 2, HOST_CCREG);
       emit_far_call(ndrc_get_addr_ht);
       emit_jmpreg(0);
     }
@@ -3620,6 +3666,7 @@ static void cop0_assemble(int i, const struct regstat *i_regs, int ccadj_)
       emit_cmp(HOST_TEMPREG, 0);
       void *jaddr = out;
       emit_jeq(0);
+      emit_readptr(&hash_table_ptr, 1);
       emit_far_call(ndrc_get_addr_ht);
       emit_jmpreg(0);
       set_jump_target(jaddr, out);
@@ -3642,11 +3689,7 @@ static void rfe_assemble(int i, const struct regstat *i_regs)
 
 static int cop2_is_stalling_op(int i, int *cycles)
 {
-  if (dops[i].opcode == 0x3a) { // SWC2
-    *cycles = 0;
-    return 1;
-  }
-  if (dops[i].itype == COP2 && (dops[i].opcode2 == 0 || dops[i].opcode2 == 2)) { // MFC2/CFC2
+  if (dops[i].itype == COP2 || dops[i].itype == C2LS) {
     *cycles = 0;
     return 1;
   }
@@ -3680,7 +3723,7 @@ static void emit_log_gte_stall(int i, int stall, u_int reglist)
 
 static void cop2_do_stall_check(u_int op, int i, const struct regstat *i_regs, u_int reglist)
 {
-  int j = i, other_gte_op_cycles = -1, stall = -MAXBLOCK, cycles_passed;
+  int j = i, cycles, other_gte_op_cycles = -1, stall = -MAXBLOCK, cycles_passed;
   int rtmp = reglist_find_free(reglist);
 
   if (HACK_ENABLED(NDHACK_NO_STALLS))
@@ -3704,17 +3747,11 @@ static void cop2_do_stall_check(u_int op, int i, const struct regstat *i_regs, u
   if (other_gte_op_cycles >= 0)
     stall = other_gte_op_cycles - cycles_passed;
   else if (cycles_passed >= 44)
-    stall = 0; // can't stall
+    stall = 0; // can't possibly stall
   if (stall == -MAXBLOCK && rtmp >= 0) {
     // unknown stall, do the expensive runtime check
     assem_debug("; cop2_do_stall_check\n");
-#if 0 // too slow
-    save_regs(reglist);
-    emit_movimm(gte_cycletab[op], 0);
-    emit_addimm(HOST_CCREG, cinfo[i].ccadj, 1);
-    emit_far_call(call_gteStall);
-    restore_regs(reglist);
-#else
+    // busy - (cc + adj) -> busy - adj - cc
     host_tempreg_acquire();
     emit_readword(&psxRegs.gteBusyCycle, rtmp);
     emit_addimm(rtmp, -cinfo[i].ccadj, rtmp);
@@ -3723,7 +3760,6 @@ static void cop2_do_stall_check(u_int op, int i, const struct regstat *i_regs, u
     emit_cmovb_reg(rtmp, HOST_CCREG);
     //emit_log_gte_stall(i, 0, reglist);
     host_tempreg_release();
-#endif
   }
   else if (stall > 0) {
     //emit_log_gte_stall(i, stall, reglist);
@@ -3731,7 +3767,8 @@ static void cop2_do_stall_check(u_int op, int i, const struct regstat *i_regs, u
   }
 
   // save gteBusyCycle, if needed
-  if (gte_cycletab[op] == 0)
+  cycles = gte_cycletab[op];
+  if (cycles == 0)
     return;
   other_gte_op_cycles = -1;
   for (j = i + 1; j < slen; j++) {
@@ -3748,20 +3785,12 @@ static void cop2_do_stall_check(u_int op, int i, const struct regstat *i_regs, u
     // will handle stall when assembling that op
     return;
   cycles_passed = cinfo[min(j, slen -1)].ccadj - cinfo[i].ccadj;
-  if (cycles_passed >= 44)
+  if (cycles_passed >= cycles)
     return;
   assem_debug("; save gteBusyCycle\n");
   host_tempreg_acquire();
-#if 0
-  emit_readword(&last_count, HOST_TEMPREG);
-  emit_add(HOST_TEMPREG, HOST_CCREG, HOST_TEMPREG);
-  emit_addimm(HOST_TEMPREG, cinfo[i].ccadj, HOST_TEMPREG);
-  emit_addimm(HOST_TEMPREG, gte_cycletab[op]), HOST_TEMPREG);
+  emit_addimm(HOST_CCREG, cinfo[i].ccadj + cycles, HOST_TEMPREG);
   emit_writeword(HOST_TEMPREG, &psxRegs.gteBusyCycle);
-#else
-  emit_addimm(HOST_CCREG, cinfo[i].ccadj + gte_cycletab[op], HOST_TEMPREG);
-  emit_writeword(HOST_TEMPREG, &psxRegs.gteBusyCycle);
-#endif
   host_tempreg_release();
 }
 
@@ -5522,6 +5551,52 @@ static void rjump_assemble(int i, const struct regstat *i_regs)
   #endif
 }
 
+static void vsync_hack_assemble(int i, int ld_ofs, int cc)
+{
+  int sp = get_reg(branch_regs[i].regmap, 29);
+  int ro = get_reg(branch_regs[i].regmap, ROREG);
+  int cycles = CLOCK_ADJUST(9+5) * 16;
+  void *t_exit[3], *loop_target, *t_loop_break;
+  int j;
+  if (sp < 0 || (ram_offset && ro < 0))
+    return;
+  assem_debug("; vsync hack\n");
+  host_tempreg_acquire();
+  emit_cmpimm(cc, -cycles);
+  t_exit[0] = out;
+  emit_jge(0);
+  emit_cmpimm(sp, RAM_SIZE);
+  t_exit[1] = out;
+  emit_jno(0);
+  if (ro >= 0) {
+    emit_addimm(sp, ld_ofs, HOST_TEMPREG);
+    emit_ldr_dualindexed(ro, HOST_TEMPREG, HOST_TEMPREG);
+  }
+  else
+    emit_readword_indexed(ld_ofs, sp, HOST_TEMPREG);
+  emit_cmpimm(HOST_TEMPREG, 17);
+  t_exit[2] = out;
+  emit_jl(0);
+
+  assem_debug("1:\n");
+  loop_target = out;
+  emit_addimm(HOST_TEMPREG, -16, HOST_TEMPREG);
+  emit_addimm(cc, cycles, cc);
+  emit_cmpimm(HOST_TEMPREG, 17);
+  t_loop_break = out;
+  emit_jl(DJT_2);
+  emit_cmpimm(cc, -cycles);
+  emit_jl(loop_target);
+
+  assem_debug("2:\n");
+  set_jump_target(t_loop_break, out);
+  do_store_word(sp, ld_ofs, HOST_TEMPREG, ro, 1);
+
+  for (j = 0; j < ARRAY_SIZE(t_exit); j++)
+    set_jump_target(t_exit[j], out);
+  host_tempreg_release();
+}
+
 static void cjump_assemble(int i, const struct regstat *i_regs)
 {
   const signed char *i_regmap = i_regs->regmap;
@@ -5535,6 +5610,7 @@ static void cjump_assemble(int i, const struct regstat *i_regs)
   int internal=internal_branch(cinfo[i].ba);
   if(i==(cinfo[i].ba-start)>>2) assem_debug("idle loop\n");
   if(!match) invert=1;
+  if (vsync_hack && (vsync_hack >> 16) == i) invert=1;
   #ifdef CORTEX_A8_BRANCH_PREDICTION_HACK
   if(i>(cinfo[i].ba-start)>>2) invert=1;
   #endif
@@ -5669,6 +5745,8 @@ static void cjump_assemble(int i, const struct regstat *i_regs)
       }
       if(invert) {
         if(taken) set_jump_target(taken, out);
+        if (vsync_hack && (vsync_hack >> 16) == i)
+          vsync_hack_assemble(i, vsync_hack & 0xffff, cc);
         #ifdef CORTEX_A8_BRANCH_PREDICTION_HACK
         if (match && (!internal || !dops[(cinfo[i].ba-start)>>2].is_ds)) {
           if(adj) {
@@ -6228,11 +6306,11 @@ static noinline void new_dynarec_test(void)
 
   SysPrintf("(%p) testing if we can run recompiled code @%p...\n",
     new_dynarec_test, out);
-  ((volatile u_int *)NDRC_WRITE_OFFSET(out))[0]++; // make the cache dirty
 
   for (i = 0; i < ARRAY_SIZE(ret); i++) {
     out = ndrc->translation_cache;
     beginning = start_block();
+    ((volatile u_int *)NDRC_WRITE_OFFSET(out))[0]++; // make the cache dirty
     emit_movimm(DRC_TEST_VAL + i, 0); // test
     emit_ret();
     literal_pool(0);
@@ -6268,6 +6346,7 @@ void new_dynarec_clear_full(void)
   expirep = EXPIRITY_OFFSET;
   literalcount=0;
   stop_after_jal=0;
+  ni_count=0;
   inv_code_start=inv_code_end=~0;
   hack_addr=0;
   f1_hack=0;
@@ -6281,13 +6360,13 @@ void new_dynarec_clear_full(void)
   stat_clear(stat_links);
 
   if (ndrc_g.cycle_multiplier_old != Config.cycle_multiplier
-      || ndrc_g.hacks_old != ndrc_g.hacks)
+      || ndrc_g.hacks_old != (ndrc_g.hacks | ndrc_g.hacks_pergame))
   {
     SysPrintf("ndrc config: mul=%d, ha=%x, pex=%d\n",
       get_cycle_multiplier(), ndrc_g.hacks, Config.PreciseExceptions);
   }
   ndrc_g.cycle_multiplier_old = Config.cycle_multiplier;
-  ndrc_g.hacks_old = ndrc_g.hacks;
+  ndrc_g.hacks_old = ndrc_g.hacks | ndrc_g.hacks_pergame;
 }
 
 static int pgsize(void)
@@ -6311,12 +6390,13 @@ void new_dynarec_init(void)
   #ifdef VITA
   sceBlock = getVMBlock(); //sceKernelAllocMemBlockForVM("code", sizeof(*ndrc));
   if (sceBlock <= 0)
-    SysPrintf("sceKernelAllocMemBlockForVM failed: %x\n", sceBlock);
+    SysPrintf("getVMBlock failed: %x\n", sceBlock);
   int ret = sceKernelGetMemBlockBase(sceBlock, (void **)&ndrc);
-  if (ret < 0)
-    SysPrintf("sceKernelGetMemBlockBase failed: %x\n", ret);
-  sceKernelOpenVMDomain();
-  sceClibPrintf("translation_cache = 0x%08lx\n ", (long)ndrc->translation_cache);
+  if (ret)
+    SysPrintf("sceKernelGetMemBlockBase: %x\n", ret);
+  ret = sceKernelOpenVMDomain();
+  if (ret)
+    SysPrintf("sceKernelOpenVMDomain: %x\n", ret);
   #elif defined(_MSC_VER)
   ndrc = VirtualAlloc(NULL, sizeof(*ndrc), MEM_COMMIT | MEM_RESERVE,
     PAGE_EXECUTE_READWRITE);
@@ -6345,6 +6425,8 @@ void new_dynarec_init(void)
   void *mw = mmap(NULL, sizeof(*ndrc), PROT_READ | PROT_WRITE,
                   (flags = MAP_SHARED), fd, 0);
   assert(mw != MAP_FAILED);
+  #endif
+  #if defined(NO_WRITE_EXEC) || defined(TC_WRITE_OFFSET)
   prot = PROT_READ | PROT_EXEC;
   #endif
   ndrc = mmap((void *)desired_addr, sizeof(*ndrc), prot, flags, fd, 0);
@@ -6357,17 +6439,21 @@ void new_dynarec_init(void)
   #endif
   #endif
 #else
-  #ifndef NO_WRITE_EXEC
   ndrc = (struct ndrc_mem *)((size_t)(ndrc_bss + align) & ~align);
+  #ifndef NO_WRITE_EXEC
   // not all systems allow execute in data segment by default
   // size must be 4K aligned for 3DS?
   if (mprotect(ndrc, sizeof(*ndrc),
                PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
     SysPrintf("mprotect(%p) failed: %s\n", ndrc, strerror(errno));
   #endif
+  #ifdef TC_WRITE_OFFSET
+  #error "misconfiguration detected"
+  #endif
 #endif
   out = ndrc->translation_cache;
   new_dynarec_clear_full();
+  hash_table_ptr = hash_table;
 #ifdef HOST_IMM8
   // Copy this into local area so we don't have to put it in every literal pool
   invc_ptr=invalid_code;
@@ -6411,22 +6497,23 @@ void new_dynarec_cleanup(void)
 
 static u_int *get_source_start(u_int addr, u_int *limit)
 {
-  if (addr < 0x00800000
-      || (0x80000000 <= addr && addr < 0x80800000)
-      || (0xa0000000 <= addr && addr < 0xa0800000))
+  if (addr < 0x00800000u
+      || (0x80000000u <= addr && addr < 0x80800000u)
+      || (0xa0000000u <= addr && addr < 0xa0800000u))
   {
     // used for BIOS calls mostly?
     *limit = (addr & 0xa0600000) + 0x00200000;
     return (u_int *)(psxM + (addr & 0x1fffff));
   }
   else if (
-    /* (0x9fc00000 <= addr && addr < 0x9fc80000) ||*/
-    (0xbfc00000 <= addr && addr < 0xbfc80000))
+    (0x9fc00000u <= addr && addr < 0x9fc80000u) ||
+    (0xbfc00000u <= addr && addr < 0xbfc80000u))
   {
-    // BIOS. The multiplier should be much higher as it's uncached 8bit mem,
-    // but timings in PCSX are too tied to the interpreter's 2-per-insn assumption
-    if (!HACK_ENABLED(NDHACK_OVERRIDE_CYCLE_M))
-      cycle_multiplier_active = 200;
+    // BIOS. The multiplier should be much higher as it's uncached 8bit mem
+    // XXX: disabled as this introduces differences from the interpreter
+    // and lightrec multipliers making emu variations act inconsistently
+    //if (!HACK_ENABLED(NDHACK_OVERRIDE_CYCLE_M))
+    //  cycle_multiplier_active = 200;
 
     *limit = (addr & 0xfff00000) | 0x80000;
     return (u_int *)((u_char *)psxR + (addr&0x7ffff));
@@ -6542,7 +6629,7 @@ void new_dynarec_load_blocks(const void *save, int size)
         psxRegs.GPR.r[i] = 0x1f800000;
     }
 
-    ndrc_get_addr_ht_param(sblocks[b].addr, ndrc_cm_compile_offline);
+    ndrc_get_addr_ht_param(hash_table, sblocks[b].addr, ndrc_cm_compile_offline);
 
     for (f = sblocks[b].regflags, i = 0; f; f >>= 1, i++) {
       if (f & 1)
@@ -6576,9 +6663,55 @@ static void force_intcall(int i)
   cinfo[i].ba = -1;
 }
 
+static noinline void do_vsync(int i)
+{
+  // lui a0, x; addiu a0, x; jal puts
+  u32 addr = (cinfo[i].imm << 16) + (signed short)cinfo[i+1].imm;
+  char *str = NULL;
+  int j, t, jals_cnt = 0;
+
+  if (!is_ram_addr(addr))
+      return;
+  str = (char *)psxM + (addr & 0x1fffff);
+  if (!str || strncmp(str, "VSync: timeout", 14))
+    return;
+  // jal clearPad, jal clearRCnt; j return; nop
+  for (j = i+2; j < slen; j++) {
+    if (dops[j].itype == SHIFTIMM || dops[j].itype == IMM16 || dops[j].itype == ALU)
+      continue;
+    if (dops[j].opcode == 0x03) {
+      jals_cnt++; continue;
+    }
+    break;
+  }
+  if (j >= slen || jals_cnt != 3 || dops[j++].opcode != 0x02)
+    return;
+  for (; j < slen; j++)
+    if (dops[j].itype != SHIFTIMM && dops[j].itype != IMM16)
+      break;
+  if (j >= slen || dops[j].opcode != 0x23) // lw x, condition
+    return;
+  j += 2;
+  if (dops[j].opcode != 0 || dops[j].opcode2 != 0x2A) // slt x, y
+    return;
+  if (dops[++j].opcode != 0x05) // bnez x, loop
+    return;
+  t = (cinfo[j].ba - start) / 4;
+  if (t < 0 || t >= slen)
+    return;
+  // lw x, d(sp)
+  if (dops[t].opcode != 0x23 || dops[t].rs1 != 29 || (u32)cinfo[t].imm >= 1024)
+    return;
+  if (dops[t+2].opcode != 0x09 || cinfo[t+2].imm != -1) // addiu x, -1
+    return;
+  SysPrintf("vsync @%08x\n", start + t*4);
+  vsync_hack = (j << 16) | (cinfo[t].imm & 0xffff);
+}
+
 static int apply_hacks(void)
 {
   int i;
+  vsync_hack = 0;
   if (HACK_ENABLED(NDHACK_NO_COMPAT_HACKS))
     return 0;
   /* special hack(s) */
@@ -6592,6 +6725,19 @@ static int apply_hacks(void)
       SysPrintf("PE2 hack @%08x\n", start + (i+3)*4);
       dops[i + 3].itype = NOP;
     }
+    // see also: psxBiosCheckExe()
+    if (i > 1 && dops[i].opcode == 0x0f && dops[i].rt1 == 4
+        && dops[i+1].opcode == 0x09 && dops[i+1].rt1 == 4 && dops[i+1].rs1 == 4
+        && dops[i+2].opcode == 0x03)
+    {
+      do_vsync(i);
+    }
+  }
+  if (source[0] == 0x3c05edb8 && source[1] == 0x34a58320)
+  {
+    // lui a1, 0xEDB8; ori a1, 0x8320
+    SysPrintf("F1 2000 hack @%08x\n", start);
+    cycle_multiplier_active = 100;
   }
   i = slen;
   if (i > 10 && source[i-1] == 0 && source[i-2] == 0x03e00008
@@ -6610,6 +6756,7 @@ static int apply_hacks(void)
       return 1;
     }
   }
+#if 0 // alt vsync, not used
   if (Config.HLE)
   {
     if (start <= psxRegs.biosBranchCheck && psxRegs.biosBranchCheck < start + i*4)
@@ -6622,6 +6769,7 @@ static int apply_hacks(void)
       }
     }
   }
+#endif
   return 0;
 }
 
@@ -6789,7 +6937,7 @@ static void disassemble_one(int i, u_int src)
       default:
         break;
     }
-    if (type == INTCALL)
+    if (type == INTCALL && ni_count < 64)
       SysPrintf("NI %08x @%08x (%08x)\n", src, start + i*4, start);
     dops[i].itype = type;
     dops[i].opcode2 = op2;
@@ -6938,7 +7086,7 @@ static void disassemble_one(int i, u_int src)
 
 static noinline void pass1_disassemble(u_int pagelimit)
 {
-  int i, j, done = 0, ni_count = 0;
+  int i, j, done = 0;
   int ds_next = 0;
 
   for (i = 0; !done; i++)
@@ -7058,7 +7206,17 @@ static noinline void pass1_disassemble(u_int pagelimit)
 
     /* Is this the end of the block? */
     if (i > 0 && dops[i-1].is_ujump) {
-      if (dops[i-1].rt1 == 0) { // not jal
+      // Don't recompile stuff that's already compiled
+      if (check_addr(start + i*4+4)) {
+        done = 1;
+        continue;
+      }
+      // Don't get too close to the limit
+      if (i > MAXBLOCK - 64)
+        done = 2;
+      if (dops[i-1].opcode2 == 0x08 || dops[i-1].rs1 == 31) // JR; JALR x, lr
+        done = 2;
+      else if (dops[i-1].itype != RJUMP && dops[i-1].rt1 == 0) { // not JAL(R)
         int found_bbranch = 0, t = (cinfo[i-1].ba - start) / 4;
         if ((u_int)(t - i) < 64 && start + (t+64)*4 < pagelimit) {
           // scan for a branch back to i+1
@@ -7078,29 +7236,26 @@ static noinline void pass1_disassemble(u_int pagelimit)
           done = 2;
       }
       else {
-        if(stop_after_jal) done=1;
-        // Stop on BREAK
-        if((source[i+1]&0xfc00003f)==0x0d) done=1;
+        // jal(r) - continue or perf may suffer for platforms without
+        // runtime block linking (like in crash3)
+        if (stop_after_jal)
+          done = 2;
       }
-      // Don't recompile stuff that's already compiled
-      if(check_addr(start+i*4+4)) done=1;
-      // Don't get too close to the limit
-      if (i > MAXBLOCK - 64)
-        done = 1;
     }
     if (dops[i].itype == HLECALL)
       done = 1;
-    else if (dops[i].itype == INTCALL)
+    else if (dops[i].itype == INTCALL) {
+      ni_count++;
       done = 2;
+    }
     else if (dops[i].is_exception)
-      done = stop_after_jal ? 1 : 2;
+      done = 2;
     if (done == 2) {
       // Does the block continue due to a branch?
-      for(j=i-1;j>=0;j--)
-      {
-        if(cinfo[j].ba==start+i*4) done=j=0; // Branch into delay slot
-        if(cinfo[j].ba==start+i*4+4) done=j=0;
-        if(cinfo[j].ba==start+i*4+8) done=j=0;
+      for (j = i-1; j >= 0; j--) {
+        if (cinfo[j].ba == start+i*4) done=j=0; // Branch into delay slot
+        if (cinfo[j].ba == start+i*4+4) done=j=0;
+        if (cinfo[j].ba == start+i*4+8) done=j=0;
       }
     }
     //assert(i<MAXBLOCK-1);
@@ -7108,11 +7263,10 @@ static noinline void pass1_disassemble(u_int pagelimit)
     assert(start+i*4<pagelimit);
     if (i == MAXBLOCK - 2)
       done = 1;
-    // Stop if we're compiling junk
-    if (dops[i].itype == INTCALL && (++ni_count > 8 || dops[i].opcode == 0x11)) {
-      done=stop_after_jal=1;
-      SysPrintf("Disabled speculative precompilation\n");
-    }
+  }
+  if (ni_count > 32 && !stop_after_jal) {
+    stop_after_jal = 1;
+    SysPrintf("Disabled speculative precompilation\n");
   }
   while (i > 0 && dops[i-1].is_jump)
     i--;
@@ -7291,6 +7445,17 @@ static noinline void pass2a_unneeded_other(void)
         if (dops[j].rt1 == base)
           break;
       }
+    }
+    // rm redundant stack loads (unoptimized code, assuming no io mem access through sp)
+    if (i > 0 && dops[i].is_load && dops[i].rs1 == 29 && dops[i].ls_type == LS_32
+        && dops[i-1].is_store && dops[i-1].rs1 == 29 && dops[i-1].ls_type == LS_32
+        && dops[i-1].rs2 == dops[i].rt1 && !dops[i-1].is_ds && i < slen - 1
+        && dops[i+1].rs1 != dops[i].rt1 && dops[i+1].rs2 != dops[i].rt1
+        && !dops[i].bt && cinfo[i].imm == cinfo[i-1].imm)
+    {
+      cinfo[i].imm = 0;
+      memset(&dops[i], 0, sizeof(dops[i]));
+      dops[i].itype = NOP;
     }
   }
 }
@@ -8989,13 +9154,13 @@ static struct block_info *new_block_info(u_int start, u_int len,
   return block;
 }
 
-static int new_recompile_block(u_int addr)
+static int noinline new_recompile_block(u_int addr)
 {
   u_int pagelimit = 0;
   u_int state_rflags = 0;
   int i;
 
-  assem_debug("NOTCOMPILED: addr = %x -> %p\n", addr, out);
+  assem_debug("NOTCOMPILED: addr = %x -> %p\n", addr, log_addr(out));
 
   if (addr & 3) {
     if (addr != hack_addr) {
@@ -9038,6 +9203,7 @@ static int new_recompile_block(u_int addr)
     emit_addimm(0, 0x18, 0);
     emit_adds_ptr(1, 1, 1);
     emit_ldr_dualindexed(1, 0, 0);
+    emit_readptr(&hash_table_ptr, 1);
     emit_writeword(0, &psxRegs.GPR.r[26]); // lw k0, 0x18(sp)
     emit_far_call(ndrc_get_addr_ht);
     emit_jmpreg(0); // jr k0
@@ -9319,7 +9485,8 @@ static int new_recompile_block(u_int addr)
   /* Pass 9 - Linker */
   for(i=0;i<linkcount;i++)
   {
-    assem_debug("%p -> %8x\n",link_addr[i].addr,link_addr[i].target);
+    assem_debug("link: %p -> %08x\n",
+      log_addr(link_addr[i].addr), link_addr[i].target);
     literal_pool(64);
     if (!link_addr[i].internal)
     {
@@ -9374,7 +9541,7 @@ static int new_recompile_block(u_int addr)
   {
     if ((i == 0 || dops[i].bt) && instr_addr[i])
     {
-      assem_debug("%p (%d) <- %8x\n", instr_addr[i], i, start + i*4);
+      assem_debug("%p (%d) <- %8x\n", log_addr(instr_addr[i]), i, start + i*4);
       u_int vaddr = start + i*4;
 
       literal_pool(256);

@@ -401,6 +401,7 @@ out:
 #ifdef _3DS
 static u32 mapped_addrs[8];
 static u32 mapped_ram, mapped_ram_src;
+static void *vram_mem;
 
 // http://3dbrew.org/wiki/Memory_layout#ARM11_User-land_memory_regions
 static void *pl_3ds_mmap(unsigned long addr, size_t size,
@@ -409,6 +410,9 @@ static void *pl_3ds_mmap(unsigned long addr, size_t size,
    void *ret = MAP_FAILED;
    *can_retry_addr = 0;
    (void)addr;
+
+   if (tag == MAP_TAG_VRAM && vram_mem)
+      return vram_mem;
 
    if (__ctr_svchax) do
    {
@@ -480,6 +484,9 @@ static void pl_3ds_munmap(void *ptr, size_t size, enum psxMapTag tag)
 {
    (void)tag;
 
+   if (ptr && ptr == vram_mem)
+      return;
+
    if (ptr && __ctr_svchax)
    {
       size_t i;
@@ -502,6 +509,26 @@ static void pl_3ds_munmap(void *ptr, size_t size, enum psxMapTag tag)
    }
 
    free(ptr);
+}
+
+// debug
+static int ctr_get_tlbe_k(u32 ptr)
+{
+   u32 tlb_base = -1, tlb_ctl = -1, *l1;
+   s32 tlb_mask = 0xffffc000;
+
+   asm volatile("mrc p15, 0, %0, c2, c0, 0" : "=r"(tlb_base));
+   asm volatile("mrc p15, 0, %0, c2, c0, 2" : "=r"(tlb_ctl));
+   tlb_mask >>= tlb_ctl & 7;
+   l1 = (u32 *)((tlb_base & tlb_mask) | 0xe0000000);
+   return l1[ptr >> 20];
+}
+
+static int ctr_get_tlbe(void *ptr)
+{
+   if (svcConvertVAToPA((void *)0xe0000000, 0) != 0x20000000)
+      return -1;
+   return svcCustomBackdoor(ctr_get_tlbe_k, ptr, NULL, NULL);
 }
 #endif
 
@@ -552,7 +579,6 @@ static psx_map_t custom_psx_maps[] = {
 
 static int init_vita_mmap()
 {
-   int n;
    void *tmpaddr;
    addr = malloc(64 * 1024 * 1024);
    if (addr == NULL)
@@ -566,6 +592,7 @@ static int init_vita_mmap()
    custom_psx_maps[5].buffer = tmpaddr + 0x2000000;
    memset(tmpaddr, 0, 0x2210000);
 #if 0
+   int n;
    for(n = 0; n < 5; n++){
    sceClibPrintf("addr reserved %x\n",custom_psx_maps[n].buffer);
    }
@@ -634,8 +661,9 @@ static void log_mem_usage(void)
    if (__ctr_svchax)
       svcGetSystemInfo(&mem_used, 0, 1);
 
-   SysPrintf("mem: %d/%d heap: %d linear: %d stack: %d exe: %d\n", (int)mem_used, app_memory,
-         __heap_size, __linear_heap_size, __stacksize__, (int)&__end__ - 0x100000);
+   SysPrintf("mem: %d/%d heap: %d linear: %d/%d stack: %d exe: %d\n",
+      (int)mem_used, app_memory, __heap_size, __linear_heap_size - linearSpaceFree(),
+      __linear_heap_size, __stacksize__, (int)&__end__ - 0x100000);
 #endif
 }
 
@@ -1942,15 +1970,13 @@ bool retro_load_game(const struct retro_game_info *info)
    for (i = 0; i < 8; ++i)
       in_type[i] = PSE_PAD_TYPE_STANDARD;
 
-   plugin_call_rearmed_cbs();
-   /* dfinput_activate(); */
-
    if (!is_exe && CheckCdrom() == -1)
    {
       LogErr("unsupported/invalid CD image: %s\n", info->path);
       return false;
    }
 
+   plugin_call_rearmed_cbs();
    SysReset();
 
    if (is_exe)
@@ -2134,7 +2160,7 @@ static void update_variables(bool in_flight)
       {
          axis_bounds_modifier = true;
       }
-      else if (strcmp(var.value, "circle") == 0)
+      else
       {
          axis_bounds_modifier = false;
       }
@@ -2180,23 +2206,20 @@ static void update_variables(bool in_flight)
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
-      if (strcmp(var.value, "disabled") == 0)
+      if (strcmp(var.value, "force") == 0)
       {
-         pl_rearmed_cbs.gpu_peops.iUseDither = 0;
-         pl_rearmed_cbs.gpu_peopsgl.bDrawDither = 0;
-         pl_rearmed_cbs.gpu_unai.dithering = 0;
-#ifdef GPU_NEON
-         pl_rearmed_cbs.gpu_neon.allow_dithering = 0;
-#endif
-      }
-      else if (strcmp(var.value, "enabled") == 0)
-      {
-         pl_rearmed_cbs.gpu_peops.iUseDither    = 1;
+         pl_rearmed_cbs.dithering = 2;
          pl_rearmed_cbs.gpu_peopsgl.bDrawDither = 1;
-         pl_rearmed_cbs.gpu_unai.dithering = 1;
-#ifdef GPU_NEON
-         pl_rearmed_cbs.gpu_neon.allow_dithering = 1;
-#endif
+      }
+      else if (strcmp(var.value, "disabled") == 0)
+      {
+         pl_rearmed_cbs.dithering = 0;
+         pl_rearmed_cbs.gpu_peopsgl.bDrawDither = 0;
+      }
+      else
+      {
+         pl_rearmed_cbs.dithering = 1;
+         pl_rearmed_cbs.gpu_peopsgl.bDrawDither = 1;
       }
    }
 
@@ -2308,7 +2331,6 @@ static void update_variables(bool in_flight)
          prev_cpu->Notify(R3000ACPU_NOTIFY_BEFORE_SAVE, NULL);
          prev_cpu->Shutdown();
          psxCpu->Init();
-         psxCpu->Reset();
          psxCpu->Notify(R3000ACPU_NOTIFY_AFTER_LOAD, NULL);
       }
    }
@@ -2451,31 +2473,6 @@ static void update_variables(bool in_flight)
          spu_config.iUseThread = 1;
       else
          spu_config.iUseThread = 0;
-   }
-#endif
-
-#if 0 // currently disabled, see USE_READ_THREAD in libpcsxcore/cdriso.c
-   if (P_HAVE_PTHREAD) {
-	   var.value = NULL;
-	   var.key = "pcsx_rearmed_async_cd";
-	   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-	   {
-		  if (strcmp(var.value, "async") == 0)
-		  {
-			 Config.AsyncCD = 1;
-			 Config.CHD_Precache = 0;
-		  }
-		  else if (strcmp(var.value, "sync") == 0)
-		  {
-			 Config.AsyncCD = 0;
-			 Config.CHD_Precache = 0;
-		  }
-		  else if (strcmp(var.value, "precache") == 0)
-		  {
-			 Config.AsyncCD = 0;
-			 Config.CHD_Precache = 1;
-		  }
-       }
    }
 #endif
 
@@ -2661,10 +2658,6 @@ static void update_variables(bool in_flight)
     * (480i, 512i) and has been obsoleted by
     * pcsx_rearmed_gpu_unai_scale_hires */
    pl_rearmed_cbs.gpu_unai.ilace_force = 0;
-   /* Note: This used to be an option, but it has no
-    * discernable effect and has been obsoleted by
-    * pcsx_rearmed_gpu_unai_scale_hires */
-   pl_rearmed_cbs.gpu_unai.pixel_skip = 0;
 
    var.key = "pcsx_rearmed_gpu_unai_old_renderer";
    var.value = NULL;
@@ -2890,26 +2883,19 @@ static uint16_t get_analog_button(int16_t ret, retro_input_state_t input_state_c
    return button;
 }
 
-unsigned char axis_range_modifier(int16_t axis_value, bool is_square)
+static unsigned char axis_range_modifier(int axis_value, bool is_square)
 {
-   float modifier_axis_range = 0;
+   int modifier_axis_range;
 
    if (is_square)
-   {
-      modifier_axis_range = round((axis_value >> 8) / 0.785) + 128;
-      if (modifier_axis_range < 0)
-      {
-         modifier_axis_range = 0;
-      }
-      else if (modifier_axis_range > 255)
-      {
-         modifier_axis_range = 255;
-      }
-   }
+      modifier_axis_range = roundf((axis_value >> 8) / 0.785f) + 128;
    else
-   {
-      modifier_axis_range = MIN(((axis_value >> 8) + 128), 255);
-   }
+      modifier_axis_range = (axis_value >> 8) + 128;
+
+   if (modifier_axis_range < 0)
+      modifier_axis_range = 0;
+   else if (modifier_axis_range > 255)
+      modifier_axis_range = 255;
 
    return modifier_axis_range;
 }
@@ -3639,7 +3625,16 @@ void retro_init(void)
    }
 
 #ifdef _3DS
-   vout_buf = linearMemAlign(VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2, 0x80);
+   // Place psx vram in linear mem to take advantage of it's supersection mapping.
+   // The emu allocs 2x (0x201000 to be exact) but doesn't really need that much,
+   // so place vout_buf below to also act as an overdraw guard.
+   vram_mem = linearMemAlign(1024*1024 + 4096 + VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2, 4096);
+   if (vram_mem) {
+      vout_buf = (char *)vram_mem + 1024*1024 + 4096;
+      if (__ctr_svchax)
+         SysPrintf("vram: %p PA %08x tlb %08x\n", vram_mem,
+               svcConvertVAToPA(vram_mem, 0), ctr_get_tlbe(vram_mem));
+   }
 #elif defined(_POSIX_C_SOURCE) && (_POSIX_C_SOURCE >= 200112L) && P_HAVE_POSIX_MEMALIGN
    if (posix_memalign(&vout_buf, 16, VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2) != 0)
       vout_buf = NULL;
@@ -3673,7 +3668,6 @@ void retro_init(void)
    if (environ_cb(RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE, &rumble))
       rumble_cb = rumble.set_rumble_state;
 
-   pl_rearmed_cbs.gpu_peops.iUseDither = 1;
    pl_rearmed_cbs.gpu_peops.dwActFixes = GPU_PEOPS_OLD_FRAME_SKIP;
 
    SaveFuncs.open = save_open;
@@ -3697,7 +3691,8 @@ void retro_deinit(void)
    }
    SysClose();
 #ifdef _3DS
-   linearFree(vout_buf);
+   linearFree(vram_mem);
+   vram_mem = NULL;
 #else
    free(vout_buf);
 #endif
@@ -3730,14 +3725,6 @@ void retro_deinit(void)
    retro_audio_latency        = 0;
    update_audio_latency       = false;
 }
-
-#ifdef VITA
-#include <psp2/kernel/threadmgr.h>
-int usleep(unsigned long us)
-{
-   sceKernelDelayThread(us);
-}
-#endif
 
 void SysPrintf(const char *fmt, ...)
 {

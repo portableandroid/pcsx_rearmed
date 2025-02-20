@@ -22,6 +22,10 @@ CFLAGS += -fsanitize=address
 LDFLAGS += -fsanitize=address
 #LDFLAGS += -static-libasan
 endif
+ifeq ($(DEBUG_UBSAN), 1)
+CFLAGS += -fsanitize=undefined -fno-sanitize=shift-base
+LDFLAGS += -fsanitize=undefined
+endif
 ifneq ($(NO_FSECTIONS), 1)
 CFLAGS += -ffunction-sections -fdata-sections
 FSECTIONS_LDFLAGS ?= -Wl,--gc-sections
@@ -107,6 +111,10 @@ OBJS += libpcsxcore/gte_neon.o
 endif
 libpcsxcore/psxbios.o: CFLAGS += -Wno-nonnull
 
+ifeq ($(MMAP_WIN32),1)
+CFLAGS += -Iinclude/mman -Ideps/mman
+OBJS += deps/mman/mman.o
+endif
 ifeq "$(USE_ASYNC_CDROM)" "1"
 libpcsxcore/cdrom-async.o: CFLAGS += -DUSE_ASYNC_CDROM
 frontend/libretro.o: CFLAGS += -DUSE_ASYNC_CDROM
@@ -118,13 +126,23 @@ endif
 ifeq "$(DYNAREC)" "lightrec"
 CFLAGS += -Ideps/lightning/include -Ideps/lightrec -Iinclude/lightning -Iinclude/lightrec \
 		  -DLIGHTREC -DLIGHTREC_STATIC
+ifeq ($(LIGHTREC_DEBUG),1)
+deps/lightrec/%.o: CFLAGS += -DLOG_LEVEL=DEBUG_L
+libpcsxcore/lightrec/plugin.o: CFLAGS += -DLIGHTREC_DEBUG=1
+frontend/main.o: CFLAGS += -DLIGHTREC_DEBUG=1
+deps/lightning/%.o: CFLAGS += -DDISASSEMBLER=1 -DBINUTILS_2_38=1 -DBINUTILS_2_29=1 \
+	-DHAVE_DISASSEMBLE_INIT_FOR_TARGET=1 -DPACKAGE_VERSION=1
+LDFLAGS += -lopcodes -lbfd
+endif
 LIGHTREC_CUSTOM_MAP ?= 0
 LIGHTREC_CUSTOM_MAP_OBJ ?= libpcsxcore/lightrec/mem.o
 LIGHTREC_THREADED_COMPILER ?= 0
 LIGHTREC_CODE_INV ?= 0
 CFLAGS += -DLIGHTREC_CUSTOM_MAP=$(LIGHTREC_CUSTOM_MAP) \
 	  -DLIGHTREC_CODE_INV=$(LIGHTREC_CODE_INV) \
-	  -DLIGHTREC_ENABLE_THREADED_COMPILER=$(LIGHTREC_THREADED_COMPILER)
+	  -DLIGHTREC_ENABLE_THREADED_COMPILER=$(LIGHTREC_THREADED_COMPILER) \
+	  -DLIGHTREC_ENABLE_DISASSEMBLER=$(or $(LIGHTREC_DEBUG),0) \
+	  -DLIGHTREC_NO_DEBUG=$(if $(LIGHTREC_DEBUG),0,1)
 ifeq ($(LIGHTREC_CUSTOM_MAP),1)
 LDLIBS += -lrt
 OBJS += $(LIGHTREC_CUSTOM_MAP_OBJ)
@@ -159,8 +177,8 @@ deps/lightning/%: CFLAGS += -Wno-uninitialized
 deps/lightrec/%: CFLAGS += -Wno-uninitialized
 libpcsxcore/lightrec/mem.o: CFLAGS += -D_GNU_SOURCE
 ifeq ($(MMAP_WIN32),1)
-CFLAGS += -Iinclude/mman -I deps/mman
-OBJS += deps/mman/mman.o
+deps/lightning/lib/lightning.o: CFLAGS += -Dmprotect=_mprotect # deps/mman
+deps/lightning/lib/jit_print.o: CFLAGS += -w
 endif
 else ifeq "$(DYNAREC)" "ari64"
 OBJS += libpcsxcore/new_dynarec/new_dynarec.o
@@ -229,7 +247,7 @@ plugins/dfsound/out.o: CFLAGS += -DHAVE_LIBRETRO
 endif
 
 # builtin gpu
-OBJS += plugins/gpulib/gpu.o plugins/gpulib/vout_pl.o
+OBJS += plugins/gpulib/gpu.o plugins/gpulib/vout_pl.o plugins/gpulib/prim.o
 ifeq "$(BUILTIN_GPU)" "neon"
 CFLAGS += -DGPU_NEON
 OBJS += plugins/gpu_neon/psx_gpu_if.o
@@ -272,9 +290,12 @@ OBJS += plugins/gpu_unai/old/if.o
 else
 CFLAGS += -DGPU_UNAI_NO_OLD
 endif
+plugins/gpu_unai/gpulib_if.o: plugins/gpu_unai/*.h
 plugins/gpu_unai/gpulib_if.o: CFLAGS += -DREARMED -DUSE_GPULIB=1
+ifneq ($(DEBUG), 1)
 plugins/gpu_unai/gpulib_if.o \
 plugins/gpu_unai/old/if.o: CFLAGS += -O3
+endif
 CC_LINK = $(CXX)
 endif
 
@@ -288,7 +309,7 @@ OBJS += $(LCHDR)/src/libchdr_cdrom.o
 OBJS += $(LCHDR)/src/libchdr_chd.o
 OBJS += $(LCHDR)/src/libchdr_flac.o
 OBJS += $(LCHDR)/src/libchdr_huffman.o
-$(LCHDR)/src/%.o: CFLAGS += -Wno-unused -Wno-maybe-uninitialized -Wno-format -std=gnu11
+$(LCHDR)/src/%.o: CFLAGS += -Wno-unused -Wno-maybe-uninitialized -std=gnu11
 OBJS += $(LCHDR_LZMA)/src/Alloc.o
 OBJS += $(LCHDR_LZMA)/src/CpuArch.o
 OBJS += $(LCHDR_LZMA)/src/Delta.o
@@ -401,11 +422,6 @@ CFLAGS += -DFRONTEND_SUPPORTS_RGB565
 CFLAGS += -DHAVE_LIBRETRO
 INC_LIBRETRO_COMMON := 1
 
-ifneq ($(DYNAREC),lightrec)
-ifeq ($(MMAP_WIN32),1)
-OBJS += libpcsxcore/memmap_win32.o
-endif
-endif
 endif # $(PLATFORM) == "libretro"
 
 ifeq "$(USE_RTHREADS)" "1"
@@ -472,8 +488,8 @@ target_: $(TARGET)
 
 $(TARGET): $(OBJS)
 ifeq ($(PARTIAL_LINKING), 1)
-	$(LD) -o $(basename $(TARGET))1.o -r --gc-sections $(addprefix -u , $(shell cat frontend/libretro-extern)) $^
-	$(OBJCOPY) --keep-global-symbols=frontend/libretro-extern $(basename $(TARGET))1.o $(basename $(TARGET)).o
+	$(LD) -o $(basename $(TARGET))1.o -r --gc-sections $(addprefix -u ,$(shell cat frontend/libretro-extern)) $(addprefix -u ,$(EXTRA_EXTERN_SYMS)) $^
+	$(OBJCOPY) --keep-global-symbols=frontend/libretro-extern $(addprefix -G ,$(EXTRA_EXTERN_SYMS)) $(basename $(TARGET))1.o $(basename $(TARGET)).o
 	$(AR) rcs $@ $(basename $(TARGET)).o
 else ifeq ($(STATIC_LINKING), 1)
 	$(AR) rcs $@ $^
@@ -487,7 +503,10 @@ clean: $(PLAT_CLEAN) clean_plugins
 ifneq ($(PLUGINS),)
 plugins_: $(PLUGINS)
 
-$(PLUGINS):
+plugins/gpulib/gpulib.$(ARCH).a:
+	$(MAKE) -C plugins/gpulib/
+
+$(PLUGINS): plugins/gpulib/gpulib.$(ARCH).a
 	$(MAKE) -C $(dir $@)
 
 clean_plugins:

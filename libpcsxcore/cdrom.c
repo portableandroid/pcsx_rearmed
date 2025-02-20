@@ -343,16 +343,18 @@ void cdrLidSeekInterrupt(void)
 
 		// 02, 12, 10
 		if (!(cdr.StatP & STATUS_SHELLOPEN)) {
+			int was_reading = cdr.Reading;
 			StopReading();
 			SetPlaySeekRead(cdr.StatP, 0);
 			cdr.StatP |= STATUS_SHELLOPEN;
+			memset(cdr.Prev, 0xff, sizeof(cdr.Prev));
 
 			// IIRC this sometimes doesn't happen on real hw
 			// (when lots of commands are sent?)
 			SetResultSize(2);
 			cdr.Result[0] = cdr.StatP | STATUS_SEEKERROR;
 			cdr.Result[1] = ERROR_SHELLOPEN;
-			if (cdr.CmdInProgress) {
+			if (cdr.CmdInProgress || was_reading) {
 				psxRegs.interrupt &= ~(1 << PSXINT_CDR);
 				cdr.CmdInProgress = 0;
 				cdr.Result[0] = cdr.StatP | STATUS_ERROR;
@@ -580,18 +582,26 @@ static boolean canDoTurbo(void)
 
 static int cdrSeekTime(unsigned char *target)
 {
-	int diff = msf2sec(cdr.SetSectorPlay) - msf2sec(target);
-	int seekTime = abs(diff) * (cdReadTime / 2000);
+	int diff = abs((int)msf2sec(cdr.SetSectorPlay) - (int)msf2sec(target));
+	int seekTime = diff * (cdReadTime / 2000);
 	int cyclesSinceRS = psxRegs.cycle - cdr.LastReadSeekCycles;
 	seekTime = MAX_VALUE(seekTime, 20000);
+
+	// sled seek?
+	if (diff >= 7200)
+		seekTime = PSXCLK / 7 + diff * 64;
+	// add *something* as rotation time until the target sector
+	if (cyclesSinceRS >= cdReadTime)
+		seekTime += (8 - ((cyclesSinceRS >> 18) & 7)) * (cdReadTime / 2);
 
 	// Transformers Beast Wars Transmetals does Setloc(x),SeekL,Setloc(x),ReadN
 	// and then wants some slack time
 	if (cdr.DriveState == DRIVESTATE_PAUSED || cyclesSinceRS < cdReadTime *3/2)
 		seekTime += cdReadTime;
 
-	seekTime = MIN_VALUE(seekTime, PSXCLK * 2 / 3);
-	CDR_LOG("seek: %.2f %.2f (%.2f) st %d di %d\n", (float)seekTime / PSXCLK,
+	//seekTime = MIN_VALUE(seekTime, PSXCLK * 2 / 3);
+	CDR_LOG("seek: %02d:%02d:%02d %.2f %.2f (%.2f) st %d di %d\n",
+		target[0], target[1], target[2], (float)seekTime / PSXCLK,
 		(float)seekTime / cdReadTime, (float)cyclesSinceRS / cdReadTime,
 		cdr.DriveState, diff);
 	return seekTime;
@@ -663,6 +673,8 @@ static int msfiEq(const u8 *a, const u8 *b)
 
 void cdrPlayReadInterrupt(void)
 {
+	// this works but causes instability for timing sensitive games
+#if 0
 	int hit = cdra_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1], cdr.SetSectorPlay[2]);
 	if (!hit && cdr.PhysCdPropagations < 75/2) {
 		// this propagates the real cdrom delays to the emulated game
@@ -670,7 +682,7 @@ void cdrPlayReadInterrupt(void)
 		cdr.PhysCdPropagations++;
 		return;
 	}
-
+#endif
 	cdr.LastReadSeekCycles = psxRegs.cycle;
 
 	if (cdr.Reading) {
@@ -815,8 +827,10 @@ void cdrInterrupt(void) {
 			break;
 
 		case CdlSetloc:
-		// case CdlSetloc + CMD_WHILE_NOT_READY: // or is it?
-			CDR_LOG("CDROM setloc command (%02X, %02X, %02X)\n", cdr.Param[0], cdr.Param[1], cdr.Param[2]);
+		case CdlSetloc + CMD_WHILE_NOT_READY: // apparently?
+			if (cdr.StatP & STATUS_SHELLOPEN)
+				// wrong? Driver2 vs Amerzone
+				goto set_error;
 
 			// MM must be BCD, SS must be BCD and <0x60, FF must be BCD and <0x75
 			if (((cdr.Param[0] & 0x0F) > 0x09) || (cdr.Param[0] > 0x99) || ((cdr.Param[1] & 0x0F) > 0x09) || (cdr.Param[1] >= 0x60) || ((cdr.Param[2] & 0x0F) > 0x09) || (cdr.Param[2] >= 0x75))
@@ -931,7 +945,6 @@ void cdrInterrupt(void) {
 				error = ERROR_BAD_ARGNUM;
 				goto set_error;
 			}
-			cdr.DriveState = DRIVESTATE_STANDBY;
 			second_resp_time = cdReadTime * 125 / 2;
 			start_rotating = 1;
 			break;
@@ -1304,16 +1317,6 @@ void cdrInterrupt(void) {
 	setIrq(IrqStat, Cmd);
 }
 
-#ifdef HAVE_ARMV7
- #define ssat32_to_16(v) \
-  asm("ssat %0,#16,%1" : "=r" (v) : "r" (v))
-#else
- #define ssat32_to_16(v) do { \
-  if (v < -32768) v = -32768; \
-  else if (v > 32767) v = 32767; \
- } while (0)
-#endif
-
 static void cdrPrepCdda(s16 *buf, int samples)
 {
 #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
@@ -1332,6 +1335,10 @@ static void cdrReadInterruptSetResult(unsigned char result)
 			cdr.SetSectorPlay[0], cdr.SetSectorPlay[1], cdr.SetSectorPlay[2],
 			cdr.CmdInProgress, cdr.IrqStat);
 		cdr.Irq1Pending = result;
+		// F1 2000 timing hack :(
+		// compensate for some csum func @80014380 taking too long
+		if (!cdr.AdpcmActive)
+			psxRegs.intCycle[PSXINT_CDREAD].sCycle += cdReadTime / 10;
 		return;
 	}
 	SetResultSize(1);
