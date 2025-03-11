@@ -756,16 +756,6 @@ static void snd_feed(void *buf, int bytes)
       audio_batch_cb(buf, bytes / 4);
 }
 
-#ifdef PORTANDROID
-void out_register_libretro(struct out_driver *drv)
-{
-	drv->name = "portandroid";
-	drv->init = cb_sound_driver_init;
-	drv->finish = cb_sound_driver_finish;
-	drv->busy = cb_sound_driver_busy;
-	drv->feed = cb_sound_driver_feed;
-}
-#else
 void out_register_libretro(struct out_driver *drv)
 {
 	drv->name = "libretro";
@@ -774,7 +764,6 @@ void out_register_libretro(struct out_driver *drv)
 	drv->busy = snd_busy;
 	drv->feed = snd_feed;
 }
-#endif
 
 #define RETRO_DEVICE_PSE_STANDARD         RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD,   0)
 #define RETRO_DEVICE_PSE_ANALOG           RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_ANALOG,   0)
