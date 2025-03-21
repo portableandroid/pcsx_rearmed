@@ -141,6 +141,7 @@ static noinline void update_height(struct psx_gpu *gpu)
       break;
     case C_MANUAL:
       y = gpu->state.screen_centering_y;
+      vres += gpu->state.screen_centering_h_adj;
       break;
     default:
       // correct if slightly miscentered
@@ -920,14 +921,12 @@ long GPUfreeze(uint32_t type, GPUFreeze_t *freeze)
     case 0: // load
       renderer_sync();
       memcpy(gpu.vram, freeze->psxVRam, 1024 * 512 * 2);
-      memcpy(gpu.regs, freeze->ulControl, sizeof(gpu.regs));
+      //memcpy(gpu.regs, freeze->ulControl, sizeof(gpu.regs));
       memcpy(gpu.ex_regs, freeze->ulControl + 0xe0, sizeof(gpu.ex_regs));
       gpu.status = freeze->ulStatus;
       gpu.cmd_len = 0;
-      for (i = 8; i > 0; i--) {
-        gpu.regs[i] ^= 1; // avoid reg change detection
-        GPUwriteStatus((i << 24) | (gpu.regs[i] ^ 1));
-      }
+      for (i = 8; i > 1; i--)
+        GPUwriteStatus((i << 24) | freeze->ulControl[i]);
       renderer_sync_ecmds(gpu.ex_regs);
       renderer_update_caches(0, 0, 1024, 512, 0);
       break;
@@ -1026,10 +1025,12 @@ void GPUrearmedCallbacks(const struct rearmed_cbs *cbs)
   if (gpu.state.screen_centering_type != cbs->screen_centering_type
       || gpu.state.screen_centering_x != cbs->screen_centering_x
       || gpu.state.screen_centering_y != cbs->screen_centering_y
+      || gpu.state.screen_centering_h_adj != cbs->screen_centering_h_adj
       || gpu.state.show_overscan != cbs->show_overscan) {
     gpu.state.screen_centering_type = cbs->screen_centering_type;
     gpu.state.screen_centering_x = cbs->screen_centering_x;
     gpu.state.screen_centering_y = cbs->screen_centering_y;
+    gpu.state.screen_centering_h_adj = cbs->screen_centering_h_adj;
     gpu.state.show_overscan = cbs->show_overscan;
     update_width(&gpu);
     update_height(&gpu);
