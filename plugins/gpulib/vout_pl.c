@@ -12,7 +12,9 @@
 #include <string.h>
 #include "gpu.h"
 #include "../../frontend/plugin_lib.h"
-
+#ifdef PORTANDROID
+#include "emu_retro.h"
+#endif
 static const struct rearmed_cbs *cbs;
 
 int vout_init(void)
@@ -38,10 +40,17 @@ static void check_mode_change(int force)
   w = w_out = (gpu.status & PSX_GPU_STATUS_RGB24) ? 2048/3 : 1024;
   h = h_out = 512;
 #endif
+#ifdef PORTANDROID
+  int filter = 0;
+  cb_itf.cb_video_filter_get((CB_VID_FILTER *)&filter);
+  gpu.state.enhancement_active =
+    gpu.get_enhancement_bufer != NULL && gpu.state.enhancement_enable && (filter < 2)
+    && w <= 512 && h <= 256 && !(gpu.status & PSX_GPU_STATUS_RGB24);
+#else
   gpu.state.enhancement_active =
     gpu.get_enhancement_bufer != NULL && gpu.state.enhancement_enable
     && w <= 512 && h <= 256 && !(gpu.status & PSX_GPU_STATUS_RGB24);
-
+#endif
   if (gpu.state.enhancement_active) {
     w_out *= 2;
     h_out *= 2;
