@@ -334,6 +334,9 @@ static void vout_set_mode(int w, int h, int raw_w, int raw_h, int bpp)
 
    set_vout_fb();
    set_bgr_to_fb_func(bpp == 24);
+#ifdef PORTANDROID
+   memset(vout_buf_ptr, 0, vout_pitch_b * vout_height);
+#endif
 }
 
 // Function to add crosshairs
