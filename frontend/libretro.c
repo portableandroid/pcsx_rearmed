@@ -380,16 +380,18 @@ static void CrosshairDimensions(int port, struct CrosshairInfo *info) {
    info->size_y = psx_h * (pl_rearmed_cbs.gpu_neon.enhancement_enable ? 2 : 1) * (4.0f / 3.0f) / 40.0f;
 }
 
-static void vout_flip(const void *vram, int stride, int bgr24,
+static void vout_flip(const void *vram_, int vram_ofs, int bgr24,
       int x, int y, int w, int h, int dims_changed)
 {
    int bytes_pp = (current_fmt == RETRO_PIXEL_FORMAT_XRGB8888) ? 4 : 2;
    int bytes_pp_s = bgr24 ? 3 : 2;
    bgr_to_fb_func *bgr_to_fb = g_bgr_to_fb;
    unsigned char *dest = vout_buf_ptr;
-   const unsigned short *src = vram;
+   const unsigned char *vram = vram_;
    int dstride = vout_pitch_b, h1 = h;
-   int port = 0;
+   int enhres = w > psx_w;
+   u32 vram_mask = enhres ? ~0 : 0xfffff;
+   int port = 0, hwrapped;
 
    if (vram == NULL || dims_changed || (in_enable_crosshair[0] + in_enable_crosshair[1]) > 0)
    {
@@ -407,8 +409,22 @@ static void vout_flip(const void *vram, int stride, int bgr24,
 
    dest += x * bytes_pp + y * dstride;
 
-   for (; h1-- > 0; dest += dstride, src += stride)
-      bgr_to_fb(dest, src, w * bytes_pp_s);
+   for (; h1-- > 0; dest += dstride) {
+      bgr_to_fb(dest, vram + vram_ofs, w * bytes_pp_s);
+      vram_ofs = (vram_ofs + 2048) & vram_mask;
+   }
+
+   hwrapped = (vram_ofs & 2047) + w * bytes_pp_s - 2048;
+   if (!enhres && hwrapped > 0) {
+      // this is super-rare so just fix-up
+      vram_ofs = (vram_ofs - h * 2048) & 0xff800;
+      dest -= dstride * h;
+      dest += (w - hwrapped / bytes_pp_s) * bytes_pp;
+      for (h1 = h; h1-- > 0; dest += dstride) {
+         bgr_to_fb(dest, vram + vram_ofs, hwrapped);
+         vram_ofs = (vram_ofs + 2048) & 0xfffff;
+      }
+   }
 
    if (current_fmt == RETRO_PIXEL_FORMAT_RGB565)
    for (port = 0; port < 2; port++) {
@@ -958,6 +974,7 @@ static bool update_option_visibility(void)
          struct retro_core_option_display option_display;
          char gpu_unai_option[][40] = {
             "pcsx_rearmed_gpu_unai_blending",
+            "pcsx_rearmed_gpu_unai_skipline",
             "pcsx_rearmed_gpu_unai_lighting",
             "pcsx_rearmed_gpu_unai_fast_lighting",
             "pcsx_rearmed_gpu_unai_scale_hires",
@@ -1925,7 +1942,6 @@ bool retro_load_game(const struct retro_game_info *info)
    }
 
    plugins_opened = 1;
-   NetOpened = 0;
 
    if (OpenPlugins() == -1)
    {
@@ -2708,6 +2724,17 @@ static void update_variables(bool in_flight)
          pl_rearmed_cbs.gpu_unai.old_renderer = 1;
       else
          pl_rearmed_cbs.gpu_unai.old_renderer = 0;
+   }
+
+   var.key = "pcsx_rearmed_gpu_unai_skipline";
+   var.value = NULL;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (strcmp(var.value, "disabled") == 0)
+         pl_rearmed_cbs.gpu_unai.ilace_force = 0;
+      else if (strcmp(var.value, "enabled") == 0)
+         pl_rearmed_cbs.gpu_unai.ilace_force = 1;
    }
 
    var.key = "pcsx_rearmed_gpu_unai_lighting";

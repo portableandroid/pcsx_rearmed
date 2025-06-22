@@ -12,7 +12,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#ifndef NO_DYLIB
 #include <dlfcn.h>
+#endif
 #include <zlib.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -92,10 +94,12 @@ typedef enum
 	MA_OPT_SWFILTER,
 	MA_OPT_GAMMA,
 	MA_OPT_VOUT_MODE,
+	MA_OPT_VOUT_FULL,
 	MA_OPT_SCANLINES,
 	MA_OPT_SCANLINE_LEVEL,
 	MA_OPT_CENTERING,
 	MA_OPT_OVERSCAN,
+	MA_OPT_VSYNC,
 } menu_id;
 
 static int last_vout_w, last_vout_h, last_vout_bpp;
@@ -129,8 +133,6 @@ static const char *memcards[32];
 static int bios_sel, gpu_plugsel, spu_plugsel;
 
 #ifndef UI_FEATURES_H
-#define MENU_BIOS_PATH "bios/"
-#define MENU_SHOW_VARSCALER 0
 #define MENU_SHOW_VOUTMODE 1
 #define MENU_SHOW_SCALER2 0
 #define MENU_SHOW_NUBS_BTNS 0
@@ -140,21 +142,15 @@ static int bios_sel, gpu_plugsel, spu_plugsel;
 #define MENU_SHOW_FULLSCREEN 1
 #define MENU_SHOW_VOLUME 0
 #endif
+#ifndef MENU_SHOW_VARSCALER
+#define MENU_SHOW_VARSCALER 0
+#endif
+#ifndef MENU_SHOW_VARSCALER_C
+#define MENU_SHOW_VARSCALER_C 0
+#endif
 
 static int min(int x, int y) { return x < y ? x : y; }
 static int max(int x, int y) { return x > y ? x : y; }
-
-void emu_make_path(char *buff, const char *end, int size)
-{
-	int pos, end_len;
-
-	end_len = strlen(end);
-	pos = plat_get_root_dir(buff, size);
-	strncpy(buff + pos, end, size - pos);
-	buff[size - 1] = 0;
-	if (pos + end_len > size - 1)
-		printf("Warning: path truncated: %s\n", buff);
-}
 
 static int emu_check_save_file(int slot, int *time)
 {
@@ -441,6 +437,10 @@ static const struct {
 	CE_INTVAL(memcard2_sel),
 	CE_INTVAL(g_autostateld_opt),
 	CE_INTVAL(cd_buf_count),
+	CE_INTVAL_N("adev0_axis0", in_adev_axis[0][0]),
+	CE_INTVAL_N("adev0_axis1", in_adev_axis[0][1]),
+	CE_INTVAL_N("adev1_axis0", in_adev_axis[1][0]),
+	CE_INTVAL_N("adev1_axis1", in_adev_axis[1][1]),
 	CE_INTVAL_N("adev0_is_nublike", in_adev_is_nublike[0]),
 	CE_INTVAL_N("adev1_is_nublike", in_adev_is_nublike[1]),
 	CE_INTVAL_V(frameskip, 4),
@@ -500,10 +500,14 @@ static char *get_cd_label(void)
 
 static void make_cfg_fname(char *buf, size_t size, int is_game)
 {
-	if (is_game)
-		snprintf(buf, size, "." PCSX_DOT_DIR "cfg/%.32s-%.9s.cfg", get_cd_label(), CdromId);
+	char id_buf[64];
+	if (is_game) {
+		snprintf(id_buf, sizeof(id_buf), "%.32s-%.9s.cfg",
+			get_cd_label(), CdromId);
+		emu_make_path(buf, size, CFG_DIR, id_buf);
+	}
 	else
-		snprintf(buf, size, "." PCSX_DOT_DIR "%s", cfgfile_basename);
+		emu_make_path(buf, size, PCSX_DOT_DIR, cfgfile_basename);
 }
 
 static void keys_write_all(FILE *f);
@@ -569,7 +573,7 @@ static int menu_do_last_cd_img(int is_get)
 	FILE *f;
 	int i, ret = -1;
 
-	snprintf(path, sizeof(path), "." PCSX_DOT_DIR "lastcdimg.txt");
+	emu_make_path(path, sizeof(path), PCSX_DOT_DIR, "lastcdimg.txt");
 	f = fopen(path, is_get ? "r" : "w");
 	if (f == NULL) {
 		ret = -1;
@@ -1114,6 +1118,10 @@ static void keys_load_all(const char *cfg)
 
 static int key_config_loop_wrap(int id, int keys)
 {
+	int d;
+
+	for (d = 0; d < IN_MAX_DEVS; d++)
+		in_set_config_int(d, IN_CFG_ANALOG_MAP_ULDR, 0);
 	switch (id) {
 		case MA_CTRL_PLAYER1:
 			key_config_loop(me_ctrl_actions, array_size(me_ctrl_actions) - 1, 0);
@@ -1127,6 +1135,9 @@ static int key_config_loop_wrap(int id, int keys)
 		default:
 			break;
 	}
+	for (d = 0; d < IN_MAX_DEVS; d++)
+		in_set_config_int(d, IN_CFG_ANALOG_MAP_ULDR, 1);
+
 	return 0;
 }
 
@@ -1278,7 +1289,11 @@ static int menu_loop_keyconfig(int id, int keys)
 // ------------ gfx options menu ------------
 
 static const char *men_scaler[] = {
-	"1x1", "integer scaled 2x", "scaled 4:3", "integer scaled 4:3", "fullscreen", "custom", NULL
+	"1x1", "integer scaled 2x", "scaled 4:3", "integer scaled 4:3", "fullscreen",
+#if MENU_SHOW_VARSCALER_C
+	"custom",
+#endif
+	NULL
 };
 static const char *men_soft_filter[] = { "None",
 #ifdef HAVE_NEON32
@@ -1383,10 +1398,11 @@ static int menu_loop_cscaler(int id, int keys)
 
 static menu_entry e_menu_gfx_options[] =
 {
-	mee_enum      ("Screen centering",         MA_OPT_CENTERING, pl_rearmed_cbs.screen_centering_type, men_centering),
+	mee_enum      ("PSX Screen centering",     MA_OPT_CENTERING, pl_rearmed_cbs.screen_centering_type, men_centering),
 	mee_enum      ("Show overscan",            MA_OPT_OVERSCAN, pl_rearmed_cbs.show_overscan, men_overscan),
 	mee_enum_h    ("Scaler",                   MA_OPT_VARSCALER, g_scaler, men_scaler, h_scaler),
 	mee_enum      ("Video output mode",        MA_OPT_VOUT_MODE, plat_target.vout_method, men_dummy),
+	mee_onoff     ("Fullscreen mode",          MA_OPT_VOUT_FULL, plat_target.vout_fullscreen, 1),
 	mee_onoff     ("Software Scaling",         MA_OPT_SCALER2, soft_scaling, 1),
 	mee_enum      ("Hardware Filter",          MA_OPT_HWFILTER, plat_target.hwfilter, men_dummy),
 	mee_enum_h    ("Software Filter",          MA_OPT_SWFILTER, soft_filter, men_soft_filter, h_soft_filter),
@@ -1395,7 +1411,7 @@ static menu_entry e_menu_gfx_options[] =
 	mee_range_h   ("Scanline brightness",      MA_OPT_SCANLINE_LEVEL, scanline_level, 0, 100, h_scanline_l),
 #endif
 	mee_range_h   ("Gamma adjustment",         MA_OPT_GAMMA, g_gamma, 1, 200, h_gamma),
-//	mee_onoff     ("Vsync",                    0, vsync, 1),
+	mee_onoff     ("OpenGL Vsync",             MA_OPT_VSYNC, g_opts, OPT_VSYNC),
 	mee_cust_h    ("Setup custom scaler",      MA_OPT_VARSCALER_C, menu_loop_cscaler, NULL, h_cscaler),
 	mee_end,
 };
@@ -1411,10 +1427,6 @@ static int menu_loop_gfx_options(int id, int keys)
 
 // ------------ bios/plugins ------------
 
-#ifdef BUILTIN_GPU_NEON
-
-static const char h_gpu_neon[] =
-	"Configure built-in NEON GPU plugin";
 static const char h_gpu_neon_enhanced[] =
 	"Renders in double resolution at perf. cost\n"
 	"(not available for high resolution games)";
@@ -1433,32 +1445,15 @@ static menu_entry e_menu_plugin_gpu_neon[] =
 	mee_end,
 };
 
-static int menu_loop_plugin_gpu_neon(int id, int keys)
-{
-	static int sel = 0;
-	me_loop(e_menu_plugin_gpu_neon, &sel);
-	return 0;
-}
-
-#endif
-
 static menu_entry e_menu_plugin_gpu_unai[] =
 {
 	mee_onoff     ("Old renderer",               0, pl_rearmed_cbs.gpu_unai.old_renderer, 1),
-	mee_onoff     ("Interlace",                  0, pl_rearmed_cbs.gpu_unai.ilace_force, 1),
+	mee_onoff     ("Skip every 2nd line",        0, pl_rearmed_cbs.gpu_unai.ilace_force, 1),
 	mee_onoff     ("Lighting",                   0, pl_rearmed_cbs.gpu_unai.lighting, 1),
 	mee_onoff     ("Fast lighting",              0, pl_rearmed_cbs.gpu_unai.fast_lighting, 1),
 	mee_onoff     ("Blending",                   0, pl_rearmed_cbs.gpu_unai.blending, 1),
 	mee_end,
 };
-
-static int menu_loop_plugin_gpu_unai(int id, int keys)
-{
-	int sel = 0;
-	me_loop(e_menu_plugin_gpu_unai, &sel);
-	return 0;
-}
-
 
 //static const char h_gpu_0[]            = "Needed for Chrono Cross";
 static const char h_gpu_1[]            = "Capcom fighting games";
@@ -1483,13 +1478,6 @@ static menu_entry e_menu_plugin_gpu_peops[] =
 	mee_onoff_h   ("Fake 'gpu busy' states",     0, pl_rearmed_cbs.gpu_peops.dwActFixes, 1<<10, h_gpu_10),
 	mee_end,
 };
-
-static int menu_loop_plugin_gpu_peops(int id, int keys)
-{
-	static int sel = 0;
-	me_loop(e_menu_plugin_gpu_peops, &sel);
-	return 0;
-}
 
 static const char *men_peopsgl_texfilter[] = { "None", "Standard", "Extended",
 	"Standard-sprites", "Extended-sprites", "Standard+sprites", "Extended+sprites", NULL };
@@ -1521,13 +1509,6 @@ static menu_entry e_menu_plugin_gpu_peopsgl[] =
 	mee_end,
 };
 
-static int menu_loop_plugin_gpu_peopsgl(int id, int keys)
-{
-	static int sel = 0;
-	me_loop(e_menu_plugin_gpu_peopsgl, &sel);
-	return 0;
-}
-
 static const char *men_spu_interp[] = { "None", "Simple", "Gaussian", "Cubic", NULL };
 static const char h_spu_volboost[]  = "Large values cause distortion";
 static const char h_spu_tempo[]     = "Slows down audio if emu is too slow\n"
@@ -1556,19 +1537,61 @@ static const char h_bios[]       = "HLE is simulated BIOS. BIOS selection is sav
 				   "savestates and can't be changed there. Must save\n"
 				   "config and reload the game for change to take effect";
 static const char h_plugin_gpu[] = 
-#ifdef BUILTIN_GPU_NEON
+#if defined(BUILTIN_GPU_NEON)
 				   "builtin_gpu is the NEON GPU, very fast and accurate\n"
+#elif defined(BUILTIN_GPU_PEOPS)
+				   "builtin_gpu is the P.E.Op.S GPU, slow but accurate\n"
+#elif defined(BUILTIN_GPU_UNAI)
+				   "builtin_gpu is the Unai GPU, very fast\n"
 #endif
+#ifndef NO_DYLIB
+#if !defined(BUILTIN_GPU_NEON) && defined(GPU_NEON)
+				   "gpu_neon is Exophase's NEON GPU, fast and accurate\n"
+#endif
+#ifndef BUILTIN_GPU_PEOPS
 				   "gpu_peops is Pete's soft GPU, slow but accurate\n"
+#endif
+#ifndef BUILTIN_GPU_UNAI
 				   "gpu_unai is the GPU renderer from PCSX4ALL\n"
+#endif
+#ifdef HAVE_GLES
 				   "gpu_gles Pete's hw GPU, uses 3D chip but is glitchy\n"
-				   "must save config and reload the game if changed";
-static const char h_plugin_spu[] = "spunull effectively disables sound\n"
-				   "must save config and reload the game if changed";
-static const char h_gpu_peops[]  = "Configure P.E.Op.S. SoftGL Driver V1.17";
-static const char h_gpu_peopsgl[]= "Configure P.E.Op.S. MesaGL Driver V1.78";
-static const char h_gpu_unai[]   = "Configure Unai/PCSX4ALL Team plugin (new)";
+#endif
+				   "must save config and reload the game if changed"
+#endif
+				   ;
+static const char h_plugin_spu[] = ""
+#ifndef NO_DYLIB
+				   "spunull effectively disables sound\n"
+				   "must save config and reload the game if changed"
+#endif
+;
+// static const char h_gpu_peops[]  = "Configure P.E.Op.S. SoftGL Driver V1.17";
+// static const char h_gpu_peopsgl[]= "Configure P.E.Op.S. MesaGL Driver V1.78";
+// static const char h_gpu_unai[]   = "Configure Unai/PCSX4ALL Team plugin (new)";
 static const char h_spu[]        = "Configure built-in P.E.Op.S. Sound Driver V1.7";
+
+static int menu_loop_pluginsel_options(int id, int keys)
+{
+	static int sel = 0;
+	if (strcmp(gpu_plugins[gpu_plugsel], "gpu_peops.so") == 0)
+		me_loop(e_menu_plugin_gpu_peops, &sel);
+	else if (strcmp(gpu_plugins[gpu_plugsel], "gpu_unai.so") == 0)
+		me_loop(e_menu_plugin_gpu_unai, &sel);
+	else if (strcmp(gpu_plugins[gpu_plugsel], "gpu_gles.so") == 0)
+		me_loop(e_menu_plugin_gpu_peopsgl, &sel);
+	else if (strcmp(gpu_plugins[gpu_plugsel], "gpu_neon.so") == 0)
+		me_loop(e_menu_plugin_gpu_neon, &sel);
+	else
+#if defined(BUILTIN_GPU_NEON)
+		me_loop(e_menu_plugin_gpu_neon, &sel);
+#elif defined(BUILTIN_GPU_PEOPS)
+		me_loop(e_menu_plugin_gpu_peops, &sel);
+#elif defined(BUILTIN_GPU_UNAI)
+		me_loop(e_menu_plugin_gpu_unai, &sel);
+#endif
+	return 0;
+}
 
 static menu_entry e_menu_plugin_options[] =
 {
@@ -1576,12 +1599,7 @@ static menu_entry e_menu_plugin_options[] =
 	mee_enum      ("GPU Dithering",                 0, pl_rearmed_cbs.dithering, men_gpu_dithering),
 	mee_enum_h    ("GPU plugin",                    0, gpu_plugsel, gpu_plugins, h_plugin_gpu),
 	mee_enum_h    ("SPU plugin",                    0, spu_plugsel, spu_plugins, h_plugin_spu),
-#ifdef BUILTIN_GPU_NEON
-	mee_handler_h ("Configure built-in GPU plugin", menu_loop_plugin_gpu_neon, h_gpu_neon),
-#endif
-	mee_handler_h ("Configure gpu_peops plugin",    menu_loop_plugin_gpu_peops, h_gpu_peops),
-	mee_handler_h ("Configure gpu_unai GPU plugin", menu_loop_plugin_gpu_unai, h_gpu_unai),
-	mee_handler_h ("Configure gpu_gles GPU plugin", menu_loop_plugin_gpu_peopsgl, h_gpu_peopsgl),
+	mee_handler   ("Configure selected GPU plugin", menu_loop_pluginsel_options),
 	mee_handler_h ("Configure built-in SPU plugin", menu_loop_plugin_spu, h_spu),
 	mee_end,
 };
@@ -1890,10 +1908,10 @@ static void handle_memcard_sel(void)
 {
 	strcpy(Config.Mcd1, "none");
 	if (memcard1_sel != 0)
-		snprintf(Config.Mcd1, sizeof(Config.Mcd1), ".%s%s", MEMCARD_DIR, memcards[memcard1_sel]);
+		emu_make_path(Config.Mcd1, sizeof(Config.Mcd1), MEMCARD_DIR, memcards[memcard1_sel]);
 	strcpy(Config.Mcd2, "none");
 	if (memcard2_sel != 0)
-		snprintf(Config.Mcd2, sizeof(Config.Mcd2), ".%s%s", MEMCARD_DIR, memcards[memcard2_sel]);
+		emu_make_path(Config.Mcd2, sizeof(Config.Mcd2), MEMCARD_DIR, memcards[memcard2_sel]);
 	LoadMcds(Config.Mcd1, Config.Mcd2);
 	draw_mc_bg();
 }
@@ -1990,8 +2008,7 @@ static void menu_bios_warn(void)
 	int inp;
 	static const char msg[] =
 		"You don't seem to have copied any BIOS\n"
-		"files to\n"
-		MENU_BIOS_PATH "\n\n"
+		"files to\n%s\n\n"
 
 		"While many games work fine with fake\n"
 		"(HLE) BIOS, others (like MGS and FF8)\n"
@@ -2005,7 +2022,7 @@ static void menu_bios_warn(void)
 		"Press %s or %s to continue";
 	char tmp_msg[sizeof(msg) + 64];
 
-	snprintf(tmp_msg, sizeof(tmp_msg), msg,
+	snprintf(tmp_msg, sizeof(tmp_msg), msg, Config.BiosDir,
 		in_get_key_name(-1, -PBTN_MOK), in_get_key_name(-1, -PBTN_MBACK));
 	while (1)
 	{
@@ -2063,9 +2080,7 @@ static const char credits_text[] =
 	"(C) 2005-2009 PCSX-df Team\n"
 	"(C) 2009-2011 PCSX-Reloaded Team\n\n"
 	"ARM recompiler (C) 2009-2011 Ari64\n"
-#ifdef BUILTIN_GPU_NEON
 	"ARM NEON GPU (c) 2011-2012 Exophase\n"
-#endif
 	"PEOpS GPU and SPU by Pete Bernert\n"
 	"  and the P.E.Op.S. team\n"
 	"PCSX4ALL plugin by PCSX4ALL team\n"
@@ -2094,7 +2109,6 @@ static int reload_plugins(const char *cdimg)
 	set_cd_image(cdimg);
 	LoadPlugins();
 	pcnt_hook_plugins();
-	NetOpened = 0;
 	if (OpenPlugins() == -1) {
 		menu_update_msg("failed to open plugins");
 		return -1;
@@ -2489,7 +2503,6 @@ static void scan_bios_plugins(void)
 	char fname[MAXPATHLEN];
 	struct dirent *ent;
 	int bios_i, gpu_i, spu_i, mc_i;
-	char *p;
 	DIR *dir;
 
 	bioses[0] = "HLE";
@@ -2502,7 +2515,11 @@ static void scan_bios_plugins(void)
 	dir = opendir(fname);
 	if (dir == NULL) {
 		perror("scan_bios_plugins bios opendir");
+#ifndef NO_DYLIB
 		goto do_plugins;
+#else
+		goto do_memcards;
+#endif
 	}
 
 	while (1) {
@@ -2536,6 +2553,7 @@ static void scan_bios_plugins(void)
 
 	closedir(dir);
 
+#ifndef NO_DYLIB
 do_plugins:
 	snprintf(fname, sizeof(fname), "%s/", Config.PluginsDir);
 	dir = opendir(fname);
@@ -2546,6 +2564,7 @@ do_plugins:
 
 	while (1) {
 		void *h, *tmp;
+		char *p;
 
 		errno = 0;
 		ent = readdir(dir);
@@ -2587,9 +2606,11 @@ do_plugins:
 	}
 
 	closedir(dir);
+#endif
 
 do_memcards:
-	dir = opendir("." MEMCARD_DIR);
+	emu_make_path(fname, sizeof(fname), MEMCARD_DIR, NULL);
+	dir = opendir(fname);
 	if (dir == NULL) {
 		perror("scan_bios_plugins memcards opendir");
 		return;
@@ -2609,7 +2630,7 @@ do_memcards:
 		if (ent->d_type != DT_REG && ent->d_type != DT_LNK)
 			continue;
 
-		snprintf(fname, sizeof(fname), "." MEMCARD_DIR "%s", ent->d_name);
+		emu_make_path(fname, sizeof(fname), MEMCARD_DIR, ent->d_name);
 		if (stat(fname, &st) != 0) {
 			printf("bad memcard file: %s\n", ent->d_name);
 			continue;
@@ -2653,7 +2674,7 @@ void menu_init(void)
 		exit(1);
 	}
 
-	emu_make_path(buff, "skin/background.png", sizeof(buff));
+	emu_make_data_path(buff, "skin/background.png", sizeof(buff));
 	readpng(g_menubg_src_ptr, buff, READPNG_BG, g_menuscreen_w, g_menuscreen_h);
 
 	i = plat_target.cpu_clock_set != NULL
@@ -2665,20 +2686,27 @@ void menu_init(void)
 	me_enable(e_menu_gfx_options, MA_OPT_VOUT_MODE,
 		plat_target.vout_methods != NULL);
 
+#ifndef SDL_OVERLAY_2X
+	i = me_id2offset(e_menu_gfx_options, MA_OPT_VOUT_FULL);
+	e_menu_gfx_options[i].data = plat_target.vout_methods;
+	me_enable(e_menu_gfx_options, MA_OPT_VOUT_FULL, 0);
+#endif
+
 	i = me_id2offset(e_menu_gfx_options, MA_OPT_HWFILTER);
 	e_menu_gfx_options[i].data = plat_target.hwfilters;
-	me_enable(e_menu_gfx_options, MA_OPT_HWFILTER,
-		plat_target.hwfilters != NULL);
+	me_enable(e_menu_gfx_options, MA_OPT_HWFILTER, plat_target.hwfilters != NULL);
+	if (plat_target.hwfilters && !strcmp(plat_target.hwfilters[0], "linear"))
+		e_menu_gfx_options[i].name = "OpenGL filter";
+	else
+		me_enable(e_menu_gfx_options, MA_OPT_VSYNC, 0);
 
-	me_enable(e_menu_gfx_options, MA_OPT_GAMMA,
-		plat_target.gamma_set != NULL);
-
-#ifdef HAVE_PRE_ARMV7
+	me_enable(e_menu_gfx_options, MA_OPT_GAMMA, plat_target.gamma_set != NULL);
+#ifdef HAVE_NEON32
 	me_enable(e_menu_gfx_options, MA_OPT_SWFILTER, 0);
 #endif
 	me_enable(e_menu_gfx_options, MA_OPT_VARSCALER, MENU_SHOW_VARSCALER);
 	me_enable(e_menu_gfx_options, MA_OPT_VOUT_MODE, MENU_SHOW_VOUTMODE);
-	me_enable(e_menu_gfx_options, MA_OPT_VARSCALER_C, MENU_SHOW_VARSCALER);
+	me_enable(e_menu_gfx_options, MA_OPT_VARSCALER_C, MENU_SHOW_VARSCALER_C);
 	me_enable(e_menu_gfx_options, MA_OPT_SCALER2, MENU_SHOW_SCALER2);
 	me_enable(e_menu_keyconfig, MA_CTRL_NUBS_BTNS, MENU_SHOW_NUBS_BTNS);
 	me_enable(e_menu_keyconfig, MA_CTRL_VIBRATION, MENU_SHOW_VIBRATION);
